@@ -1,0 +1,12 @@
+{
+  "name": "dhan-ai-trader",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "db:migrate": "pnpm --filter api db:migrate"
+  },
+  "packageManager": "pnpm@11.21.0"
+}

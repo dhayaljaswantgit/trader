@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TradingMode {
+  PAPER
+  LIVE
+}
+
+enum SessionStatus {
+  ACTIVE
+  HALTED_LOSS
+  HALTED_PROFIT
+  HALTED_CONSECUTIVE_LOSSES
+  EMERGENCY_STOP
+  CLOSED
+}
+
+/// One row per trading day: limits chosen each morning.
+model TradingSession {
+  id                String        @id @default(uuid())
+  tradingDate       String        @unique // YYYY-MM-DD IST
+  mode              TradingMode   @default(PAPER)
+  capitalInr        Decimal       @db.Decimal(14, 2)
+  maxLossInr        Decimal       @db.Decimal(14, 2)
+  maxProfitInr      Decimal?      @db.Decimal(14, 2) // null = unlimited
+  riskPerTradePct   Decimal       @db.Decimal(5, 2)
+  status            SessionStatus @default(ACTIVE)
+  realizedPnlInr    Decimal       @default(0) @db.Decimal(14, 2)
+  unrealizedPnlInr  Decimal       @default(0) @db.Decimal(14, 2)
+  consecutiveLosses Int           @default(0)
+  maxConsecutiveLosses Int        @default(3)
+  startedAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  riskDecisions     RiskDecision[]
+  paperTrades       PaperTrade[]
+}
+
+/// Single-row trading preferences.
+model Preferences {
+  id               Int      @id @default(1)
+  /// Multi-select: INTRADAY | SCALPING | POSITIONAL (carry forward)
+  styles           String[] @default(["INTRADAY"])
+  /// Multi-select: EQUITY | FUTURES | OPTIONS
+  segments         String[] @default(["OPTIONS"])
+  instrumentKeys   String[]
+  strategies       String[] @default([])
+  autoPaper        Boolean  @default(false)
+  /// Auto-create each day's session at market open using the defaults below
+  autoStartDaily   Boolean  @default(false)
+  defaultCapital   Decimal  @default(100000) @db.Decimal(14, 2)
+  defaultMaxLoss   Decimal  @default(1000) @db.Decimal(14, 2)
+  defaultMaxProfit Decimal? @db.Decimal(14, 2)
+  defaultRiskPct   Decimal  @default(0.25) @db.Decimal(5, 2)
+  defaultMaxConsecutiveLosses Int @default(3)
+  updatedAt        DateTime @updatedAt
+}
+
+model Instrument {
+  key                  String   @id // SEGMENT:securityId
+  securityId           String
+  segment              String
+  instrumentType       String
+  symbol               String
+  name                 String
+  lotSize              Int
+  tickSize             Decimal  @db.Decimal(10, 4)
+  expiry               String?
+  underlyingSecurityId String?
+  underlyingSymbol     String?
+  fnoEligible          Boolean  @default(false)
+  fnoLotSize           Int?
+  source               String
+  updatedAt            DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([underlyingSecurityId, instrumentType])
+}
+
+model Signal {
+  id              String   @id @default(uuid())
+  correlationId   String   @unique
+  strategyId      String
+  strategyVersion String
+  instrumentKey   String
+  underlying      String
+  direction       String
+  action          String
+  reasons         Json
+  checks          Json
+  entry           Float?
+  stop            Float?
+  target          Float?
+  dataFresh       Boolean
+  mode            TradingMode
+  dataSource      String
+  barTime         DateTime
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model RiskDecision {
+  id            String          @id @default(uuid())
+  correlationId String
+  sessionId     String?
+  session       TradingSession? @relation(fields: [sessionId], references: [id])
+  mode          TradingMode
+  approved      Boolean
+  reasons       Json
+  intent        Json
+  createdAt     DateTime        @default(now())
+
+  @@index([correlationId])
+}
+
+/// Durable intent ledger; unique correlationId => retries/restarts cannot duplicate.
+model OrderIntent {
+  id            String      @id @default(uuid())
+  correlationId String      @unique
+  mode          TradingMode
+  instrumentKey String
+  side          String
+  quantity      Int
+  limitPrice    Decimal     @db.Decimal(14, 2)
+  state         String
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model PaperTrade {
+  id              String         @id @default(uuid())
+  sessionId       String
+  session         TradingSession @relation(fields: [sessionId], references: [id])
+  correlationId   String         @unique
+  strategyId      String
+  underlying      String
+  instrumentKey   String
+  contract        String
+  kind            String         // EQUITY | FUTURES | OPTIONS
+  product         String         // INTRADAY | CARRY_FORWARD
+  side            String         // LONG | SHORT
+  quantity        Int
+  lotSize         Int
+  entryPrice      Decimal        @db.Decimal(14, 2)
+  stopPrice       Decimal        @db.Decimal(14, 2)
+  targetPrice     Decimal        @db.Decimal(14, 2)
+  lastPrice       Decimal        @db.Decimal(14, 2)
+  exitPrice       Decimal?       @db.Decimal(14, 2)
+  entryCharges    Decimal        @default(0) @db.Decimal(14, 2)
+  exitCharges     Decimal        @default(0) @db.Decimal(14, 2)
+  pnlInr          Decimal?       @db.Decimal(14, 2)
+  exitReason      String?
+  dataSource      String
+  fillNote        String
+  /// Strategy Builder trades: { custom, specId, uKey, dir, uEntry, uStop, uTarget, entryT, tf, curStop }
+  meta            Json?
+  openedAt        DateTime       @default(now())
+  closedAt        DateTime?
+
+  @@index([closedAt])
+}
+
+model BacktestRun {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+  label      String
+  dataSource String
+  config     Json
+  metrics    Json
+  result     Json
+}
+
+/// Append-only.
+model AuditEvent {
+  id            BigInt      @id @default(autoincrement())
+  at            DateTime    @default(now())
+  actor         String
+  action        String
+  mode          TradingMode
+  correlationId String?
+  details       Json
+}
+
+/// One batch backtest of every strategy across a fixed instrument basket (Setup page leaderboard).
+model LeaderboardRun {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+  dataSource String
+  config     Json
+  rows       Json
+}
+
+/// Per-strategy trade list + breakdowns for one leaderboard run (detail page).
+model LeaderboardDetail {
+  id         String @id @default(uuid())
+  runId      String
+  strategyId String
+  data       Json
+  @@unique([runId, strategyId])
+}
+
+/// User-built strategies (Strategy Builder). spec = StrategySpec JSON.
+model CustomStrategy {
+  id        String   @id @default(uuid())
+  name      String
+  spec      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
