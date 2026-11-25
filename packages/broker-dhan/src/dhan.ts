@@ -8,7 +8,7 @@ import { BrokerError, type BrokerHealth, type CandleQuery, type IBrokerAdapter, 
  *   POST /v2/charts/intraday              (1/5/15/25/60m, last 5 years, ≤90 days per call)
  *   POST /v2/optionchain, /v2/optionchain/expirylist  (1 unique req / 3 s)
  * Requires the Dhan "Data APIs" subscription. Headers: access-token, client-id.
- * ORDER ENDPOINTS ARE DELIBERATELY NOT IMPLEMENTED.
+ * Orders: POST /v2/orders, GET /v2/orders/{id}, DELETE /v2/orders/{id} — used ONLY when LIVE trading is switched on.
  */
 const BASE = "https://api.dhan.co/v2";
 
@@ -34,6 +34,9 @@ const parseDhanTime = (s: unknown): string | null => {
 };
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v !== 0 ? v : null);
 
+export type LiveOrder = { tag: string; side: "BUY" | "SELL"; segment: string; securityId: string; quantity: number; product: "INTRADAY" | "MARGIN" | "CNC"; price: number | null };
+export type LiveOrderStatus = { orderId: string; status: string; filledQty: number; avgPrice: number | null; reason: string | null };
+
 export class DhanAdapter implements IBrokerAdapter {
   readonly source = "DHAN" as const;
   private quoteT = new Throttle(1100);
@@ -41,13 +44,14 @@ export class DhanAdapter implements IBrokerAdapter {
   private ocT = new Throttle(3100);
   constructor(private creds: () => { clientId: string; accessToken: string }, private fetchFn: typeof fetch = fetch) {}
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private post<T>(path: string, body: unknown): Promise<T> { return this.req<T>("POST", path, body); }
+  private async req<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
     const { clientId, accessToken } = this.creds();
     if (!clientId || !accessToken) throw new BrokerError("Dhan credentials not configured (Settings → Dhan connection)", 401, "NO_CREDENTIALS");
     const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 15000);
     try {
-      const r = await this.fetchFn(BASE + path, { method: "POST", signal: ctrl.signal,
-        headers: { "access-token": accessToken, "client-id": clientId, "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
+      const r = await this.fetchFn(BASE + path, { method, signal: ctrl.signal,
+        headers: { "access-token": accessToken, "client-id": clientId, "Content-Type": "application/json", Accept: "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const text = await r.text(); let j: any; try { j = JSON.parse(text); } catch { j = { raw: text.slice(0, 200) }; }
       if (r.status === 429) { backoff.level = Math.min(backoff.level + 1, 5); backoff.until = Date.now() + 2000 * 2 ** backoff.level; }
       else if (r.ok) backoff.level = Math.max(backoff.level - 1, 0);
@@ -64,6 +68,25 @@ export class DhanAdapter implements IBrokerAdapter {
       throw e;
     } finally { clearTimeout(to); }
   }
+
+  private orderT = new Throttle(250);
+  /** Place a REAL order. Returns Dhan orderId. */
+  async placeOrder(o: LiveOrder): Promise<string> {
+    const { clientId } = this.creds();
+    const j = await this.orderT.run(() => this.post<{ orderId?: string; orderStatus?: string }>("/orders", {
+      dhanClientId: clientId, correlationId: o.tag.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 25), transactionType: o.side, exchangeSegment: o.segment,
+      productType: o.product, orderType: o.price == null ? "MARKET" : "LIMIT", validity: "DAY", securityId: o.securityId, quantity: o.quantity,
+      price: o.price ?? 0, triggerPrice: 0, disclosedQuantity: 0, afterMarketOrder: false }));
+    if (!j.orderId) throw new BrokerError(`Dhan order rejected: ${JSON.stringify(j).slice(0, 200)}`, 400, "ORDER_REJECTED");
+    return String(j.orderId);
+  }
+  async getOrder(orderId: string): Promise<LiveOrderStatus> {
+    const j = await this.orderT.run(() => this.req<any>("GET", `/orders/${encodeURIComponent(orderId)}`));
+    const o = Array.isArray(j) ? j[0] : j?.data ?? j;
+    return { orderId, status: String(o?.orderStatus ?? "UNKNOWN"), filledQty: Number(o?.filledQty ?? 0), avgPrice: Number(o?.averageTradedPrice ?? 0) || null,
+      reason: o?.omsErrorDescription ?? o?.errorDescription ?? null };
+  }
+  async cancelOrder(orderId: string): Promise<void> { await this.orderT.run(() => this.req("DELETE", `/orders/${encodeURIComponent(orderId)}`)); }
 
   private lastOk = 0; private lastErr: string | null = null;
   async healthCheck(): Promise<BrokerHealth> {

@@ -81,13 +81,13 @@ function EditLimits({ s, maxOpen, onClose, onSaved }: { s: Session; maxOpen: num
 
 export function Dashboard({ health, go }: { health: Health | null; go: (p: any) => void }) {
   const { data: sd, reload } = usePoll<{ session: Session | null; tradingDate: string }>("/api/session", 3000);
-  const { data: pos, reload: reloadPos } = usePoll<{ open: Trade[]; closed: Trade[] }>("/api/positions", 3000);
+  const { data: pos, reload: reloadPos } = usePoll<{ open: Trade[]; closed: Trade[]; today?: Record<"PAPER" | "LIVE", { realized: number; unrealized: number; trades: number }> }>("/api/positions", 3000);
   const { data: eng, reload: reloadEng } = usePoll<{ running: boolean; log: string[]; lastError: string | null }>("/api/engine", 3000);
   const { data: prefs, reload: reloadPrefs } = usePoll<any>("/api/preferences", 0);
   const { data: sigs } = usePoll<any[]>("/api/signals?action=ENTER", 6000);
   const [lev, setLev] = useState<number | null>(null);
   useEffect(() => { if (getVenue() === "DELTA") api<{ leverage: number }>("/api/delta/status").then(d => setLev(Number(d.leverage) || null)).catch(() => {}); }, []);
-  const [modal, setModal] = useState<"" | "close" | "stop">(""); const [editing, setEditing] = useState(false); const [plan, setPlan] = useState(false); const [err, setErr] = useState("");
+  const [modal, setModal] = useState<"" | "close" | "stop" | "live">(""); const [editing, setEditing] = useState(false); const [plan, setPlan] = useState(false); const [err, setErr] = useState("");
   const s = sd?.session;
   const all = () => { reload(); reloadPos(); reloadEng(); };
 
@@ -115,6 +115,11 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
           <div className="muted" style={{ fontSize: 12 }}>SESSION P&L (realized + unrealized)</div>
           <Pnl v={pnl} big />
           <div className="muted num" style={{ fontSize: 13 }}>Realized {inr(realized)} · Unrealized {inr(unreal)} · Return {fmt((pnl / Number(s.capitalInr)) * 100)}%</div>
+          {pos?.today && (pos.today.LIVE.trades > 0 || prefs?.liveTrading) && <div className="split-pnl">
+            {(["LIVE", "PAPER"] as const).map(m => { const x = pos.today![m]; return <div key={m} className={`split ${m}`}>
+              <span className="muted">{m === "LIVE" ? "🔴 Live (asli)" : "📝 Paper"} · {x.trades} trade{x.trades === 1 ? "" : "s"}</span>
+              <Pnl v={x.realized + x.unrealized} /><small className="muted num">R {inr(x.realized, 0)} · U {inr(x.unrealized, 0)}</small></div>; })}
+          </div>}
           <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
             <div><div className="actions" style={{ justifyContent: "space-between", fontSize: 12 }}><span className="muted">Loss budget used</span><span className="num">{inr(Math.max(-pnl, 0), 0)} / {inr(maxLoss, 0)}</span></div>
               <div className="bar" aria-label="loss budget used"><i style={{ width: `${lossUsed * 100}%`, background: lossUsed > 0.75 ? "var(--down)" : lossUsed > 0.4 ? "var(--warn)" : "var(--info)" }} /></div></div>
@@ -141,6 +146,10 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
         <Switch on={!!prefs?.autoEngine} onChange={async v => { await api("/api/preferences", { method: "PUT", json: { autoEngine: v } }); reloadPrefs(); }}
           label="Auto-start engine" sub={prefs?.autoEngine ? "Market khulte hi engine apne aap chalu" : "Roz manually Start karna padega"} />
         <Switch on={!!prefs?.autoPaper} onChange={toggleAuto} label="Auto paper entries" sub={prefs?.autoPaper ? "ENTER signals → paper trades" : "Sirf signals, entry nahi"} />
+        {getVenue() === "DHAN" && <Switch on={!!prefs?.liveTrading} onChange={async v => { if (v) setModal("live"); else { await api("/api/preferences", { method: "PUT", json: { liveTrading: false } }); reloadPrefs(); } }}
+          label={prefs?.liveTrading ? "🔴 LIVE trading ON" : "LIVE trading (Dhan)"} sub={prefs?.liveTrading ? `Asli orders · max ${prefs.liveMaxLots} lot/order` : "Off — sirf paper"} />}
+        {getVenue() === "DHAN" && <label className="field" style={{ width: 120 }}><span>Live max lots</span><input className="input num" type="number" min={1} max={10} defaultValue={prefs?.liveMaxLots ?? 1} key={prefs?.liveMaxLots}
+          onBlur={async e => { const n = Number(e.target.value); if (n !== prefs?.liveMaxLots) { await api("/api/preferences", { method: "PUT", json: { liveMaxLots: n } }).catch(x => setErr(String(x))); reloadPrefs(); } }} /></label>}
         <span style={{ flex: 1 }} />
         <button className="btn big" onClick={() => setModal("close")} disabled={!pos?.open.length}>✕ Close all positions</button>
         <button className="btn big danger" onClick={() => setModal("stop")} disabled={s.status === "EMERGENCY_STOP"}>⛔ EMERGENCY STOP</button>
@@ -157,7 +166,7 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
         {!pos?.open.length ? <div className="empty">Koi open position nahi</div> :
           <div className="table-wrap"><table><thead><tr><th>Contract</th><th>Side</th><th className="r">Qty</th><th className="r">Entry</th><th className="r">LTP</th><th className="r">Invested → Now</th><th className="r">SL / TGT</th><th className="r">P&L</th><th></th></tr></thead>
             <tbody>{pos.open.map(t => <tr key={t.id}>
-              <td className="sym"><b>{t.contract}</b><small>{t.kind} · {t.product} · {t.strategyId}</small></td><td><span className={`pill ${t.side}`}>{t.side}</span></td>
+              <td className="sym"><b>{(t as Trade & { mode?: string }).mode === "LIVE" && <span className="pill SHORT" style={{ marginRight: 6 }}>LIVE</span>}{t.contract}</b><small>{t.kind} · {t.product} · {t.strategyId}</small></td><td><span className={`pill ${t.side}`}>{t.side}</span></td>
               <td className="r num">{t.quantity}</td><td className="r num">{fmt(t.entryPrice)}</td><td className="r num">{fmt(t.lastPrice)}</td>
               <td className="r"><ValueCell t={t} lev={lev} /></td>
               <td className="r"><StopCell t={t} onSaved={reloadPos} /></td><td className="r"><Pnl v={livePnl(t)} /></td>
@@ -181,6 +190,9 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
     {modal === "close" && <ConfirmModal title="Close all positions?" phrase="CLOSE ALL" cta="Close all now" onClose={() => setModal("")}
       body={<>Saari <b>{pos?.open.length}</b> open paper positions abhi ke bid/ask par close hongi. Engine chalta rahega.</>}
       onConfirm={async () => { await api("/api/positions/close-all", { json: { confirm: "CLOSE ALL" } }); all(); }} />}
+    {modal === "live" && <ConfirmModal title="🔴 LIVE trading ON karein?" phrase="LIVE" cta="LIVE ON" onClose={() => setModal("")}
+      body={<>Ab engine Dhan par <b>asli orders</b> lagayega (max <b>{prefs?.liveMaxLots ?? 1} lot</b>/order). SL/target/square-off bhi asli exit orders se honge — isliye server/engine chalu rehna zaroori hai. Dhan par Static IP whitelist aur trading API access hona chahiye. EMERGENCY STOP sab asli positions bhi band karega.</>}
+      onConfirm={async () => { await api("/api/preferences", { method: "PUT", json: { liveTrading: true, liveConfirm: "LIVE" } }); reloadPrefs(); }} />}
     {modal === "stop" && <ConfirmModal title="EMERGENCY STOP" phrase="STOP" cta="Stop everything" onClose={() => setModal("")}
       body={<>Auto engine band hoga, saari positions close hongi, aur <b>aaj ke liye</b> nayi entries block ho jayengi.</>}
       onConfirm={async () => { await api("/api/emergency-stop", { method: "POST" }); all(); }} />}

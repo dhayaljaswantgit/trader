@@ -1,3 +1,4 @@
+import { registerGoogleAuth } from "./auth.ts";
 import Fastify from "fastify";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma, type PrismaClient } from "@prisma/client";
@@ -24,8 +25,11 @@ export async function buildApp(opts: { prisma: PrismaClient; clock?: () => Date;
     bodyLimit: 1_000_000,
   });
   // Optional login (server deploy): APP_USER + APP_PASSWORD → HTTP Basic auth on every request (UI and API).
+  // Google sign-in (GOOGLE_CLIENT_ID/SECRET + ALLOWED_EMAILS) takes priority; else optional Basic auth.
+  const google = process.env.NODE_ENV !== "test" && registerGoogleAuth(app);
+  if (!google) app.get("/api/me", async () => ({ email: null }));
   const authUser = process.env.APP_USER, authPass = process.env.APP_PASSWORD;
-  if (authPass && process.env.NODE_ENV !== "test") {
+  if (!google && authPass && process.env.NODE_ENV !== "test") {
     const { timingSafeEqual } = await import("node:crypto");
     const want = Buffer.from(`${authUser ?? "admin"}:${authPass}`);
     app.addHook("onRequest", async (req, reply) => {
@@ -74,7 +78,7 @@ export async function buildApp(opts: { prisma: PrismaClient; clock?: () => Date;
   // ---------- health / settings ----------
   app.get("/api/health", async () => {
     const db = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false);
-    return { ok: db, db, broker: await broker.current.healthCheck(), mode: EFFECTIVE_MODE, liveExecutionAvailable: false, serverTime: clock().toISOString(),
+    return { ok: db, db, broker: await broker.current.healthCheck(), mode: EFFECTIVE_MODE, liveExecutionAvailable: true, liveTrading: !!(await prisma.preferences.findUnique({ where: { id: 1 } }))?.liveTrading && broker.source === "DHAN", serverTime: clock().toISOString(),
       marketOpen: eng().isOpen(), venue: venue(), engines: { DHAN: engines.DHAN.status.running, DELTA: engines.DELTA.status.running }, engine: { ...eng().status, log: undefined }, instruments: { ...syncState, total: await prisma.instrument.count() }, token: tokenInfo() };
   });
 
@@ -181,6 +185,11 @@ export async function buildApp(opts: { prisma: PrismaClient; clock?: () => Date;
     for (const k of ["autoPaper", "autoStartDaily", "autoEngine", "minOneLot"]) if (b[k] !== undefined) data[k] = !!b[k];
     for (const k of ["defaultCapital", "defaultMaxLoss", "defaultRiskPct"]) if (b[k] !== undefined) { const n = Number(b[k]); if (!(n > 0)) errs.push(`${k} must be positive`); else data[k] = n; }
     if (b.defaultMaxConsecutiveLosses !== undefined) { const n = Number(b.defaultMaxConsecutiveLosses); if (!Number.isInteger(n) || n < 1 || n > 50) errs.push("Loss streak limit must be a whole number 1–50"); else data.defaultMaxConsecutiveLosses = n; }
+    if (b.liveTrading !== undefined) {
+      if (b.liveTrading === true && (venue() !== "DHAN" || b.liveConfirm !== "LIVE")) errs.push("LIVE sirf Dhan par, aur confirm mein LIVE likhna zaroori hai");
+      else { data.liveTrading = !!b.liveTrading; await audit(b.liveTrading ? "LIVE_TRADING_ON" : "LIVE_TRADING_OFF", {}); }
+    }
+    if (b.liveMaxLots !== undefined) { const n = Number(b.liveMaxLots); if (!Number.isInteger(n) || n < 1 || n > 10) errs.push("Live max lots 1–10"); else data.liveMaxLots = n; }
     if (b.maxOpenPositions !== undefined) { const n = Number(b.maxOpenPositions); if (!Number.isInteger(n) || n < 1 || n > 10) errs.push("Max open positions must be a whole number 1–10"); else data.maxOpenPositions = n; }
     if (b.defaultMaxProfit !== undefined) data.defaultMaxProfit = b.defaultMaxProfit === null || b.defaultMaxProfit === "" ? null : Number(b.defaultMaxProfit);
     if (data.defaultMaxLoss !== undefined && data.defaultCapital !== undefined && Number(data.defaultMaxLoss) > Number(data.defaultCapital)) errs.push("Max loss cannot exceed capital");
@@ -344,16 +353,24 @@ export async function buildApp(opts: { prisma: PrismaClient; clock?: () => Date;
     const { action } = req.query as { action?: string };
     return prisma.signal.findMany({ where: action ? { action, venue: venue() } : { venue: venue() }, orderBy: { createdAt: "desc" }, take: 100 });
   });
-  app.get("/api/positions", async () => {
-    const open = await prisma.paperTrade.findMany({ where: { closedAt: null, venue: venue() }, orderBy: { openedAt: "desc" } });
-    const closed = await prisma.paperTrade.findMany({ where: { closedAt: { not: null }, venue: venue() }, orderBy: { closedAt: "desc" }, take: 200 });
-    return { open, closed };
+  const modeOf = (req: { query: unknown }) => { const m = (req.query as { mode?: string }).mode; return m === "LIVE" || m === "PAPER" ? { mode: m } : {}; };
+  app.get("/api/positions", async req => {
+    const open = await prisma.paperTrade.findMany({ where: { closedAt: null, venue: venue(), ...modeOf(req) }, orderBy: { openedAt: "desc" } });
+    const closed = await prisma.paperTrade.findMany({ where: { closedAt: { not: null }, venue: venue(), ...modeOf(req) }, orderBy: { closedAt: "desc" }, take: 200 });
+    // today's P&L split paper vs live (current session)
+    const s = await currentSession(), split = { PAPER: { realized: 0, unrealized: 0, trades: 0 }, LIVE: { realized: 0, unrealized: 0, trades: 0 } };
+    if (s) for (const t of await prisma.paperTrade.findMany({ where: { sessionId: s.id, venue: venue() } })) {
+      const b = split[t.mode === "LIVE" ? "LIVE" : "PAPER"]; b.trades++;
+      if (t.closedAt) b.realized += Number(t.pnlInr);
+      else b.unrealized += (Number(t.lastPrice) - Number(t.entryPrice)) * (t.side === "LONG" ? 1 : -1) * t.quantity - Number(t.entryCharges);
+    }
+    return { open, closed, today: split };
   });
-  app.get("/api/performance", async () => {
-    const t = await prisma.paperTrade.findMany({ where: { closedAt: { not: null }, venue: venue() }, orderBy: { closedAt: "asc" } });
+  app.get("/api/performance", async req => {
+    const t = await prisma.paperTrade.findMany({ where: { closedAt: { not: null }, venue: venue(), ...modeOf(req) }, orderBy: { closedAt: "asc" } });
     const pnl = t.map(x => Number(x.pnlInr)), wins = pnl.filter(p => p > 0), losses = pnl.filter(p => p <= 0), sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
     let cum = 0; const curve = t.map(x => ({ t: Math.floor(x.closedAt!.getTime() / 1000), v: (cum += Number(x.pnlInr)) }));
-    const sessions = await prisma.tradingSession.findMany({ where: { venue: venue() }, orderBy: { tradingDate: "desc" }, take: 60 });
+    const sessions = await prisma.tradingSession.findMany({ where: { venue: venue(), ...(modeOf(req).mode ? { paperTrades: { some: modeOf(req) } } : {}) }, orderBy: { tradingDate: "desc" }, take: 60 });
     return { trades: t.length, winRate: t.length ? wins.length / t.length : null, expectancy: t.length ? sum(pnl) / t.length : null, net: sum(pnl),
       profitFactor: losses.length && sum(losses) ? sum(wins) / Math.abs(sum(losses)) : null, avgWin: wins.length ? sum(wins) / wins.length : null, avgLoss: losses.length ? sum(losses) / losses.length : null,
       curve, sessions: sessions.map(toDto), sessionsCount: sessions.length };

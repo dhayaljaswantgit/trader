@@ -1,3 +1,8 @@
+import { setDefaultResultOrder } from "node:dns";
+import { setDefaultAutoSelectFamily } from "node:net";
+// Dhan order APIs check the caller's whitelisted static IP — always connect over IPv4 so the IP is the predictable one.
+setDefaultResultOrder("ipv4first");
+setDefaultAutoSelectFamily(false); // no happy-eyeballs → the first (IPv4) address is used
 import { PrismaClient } from "@prisma/client";
 import { buildApp } from "./app.ts";
 import { config } from "./config.ts";

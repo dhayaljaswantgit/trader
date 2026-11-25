@@ -1,23 +1,53 @@
-# Coolify: New Resource → Docker Compose (from your private Git repo). Set the env vars in Coolify's UI.
-# In Coolify give the service an HTTPS domain (port 4000). Every page is behind APP_USER/APP_PASSWORD login (see docs/DEPLOY.md).
-# Uses your EXISTING Postgres: set DATABASE_URL (migrations create/upgrade the tables on every start).
+# Coolify deployment for AI Trader → https://trade.itspar.com
+#
+# In Coolify: New Resource → "Docker Compose" → this repo, this file.
+# Routing + TLS come from the Caddy labels below (coolify's caddy-docker-proxy) —
+# leave the UI "Domains" field EMPTY for this service, or Coolify adds a conflicting route (502).
+# DNS: A record trade.itspar.com → server IP.
+#
+# Set env vars in Coolify's Environment Variables tab (mark secrets as secret). Minimum:
+#   DATABASE_URL          your existing Postgres (internal URL if it's a Coolify resource)
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / ALLOWED_EMAILS / SESSION_SECRET (openssl rand -hex 32)
+#   Google redirect URI:  https://trade.itspar.com/auth/google/callback
+# Migrations run on every start (Dockerfile CMD). LIVE Dhan orders need this server's public IPv4
+# whitelisted on Dhan (Static IP).
+
 services:
   app:
     build: .
     restart: unless-stopped
     environment:
+      NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to your existing Postgres, e.g. postgresql://user:pass@host:5432/dhan_trader}
+      PUBLIC_URL: ${PUBLIC_URL:-https://trade.itspar.com}
+      # Google sign-in: only ALLOWED_EMAILS can open the app (comma separated)
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      # fallback login only if Google isn't set
       APP_USER: ${APP_USER:-jassu}
-      APP_PASSWORD: ${APP_PASSWORD:?set APP_PASSWORD (browser login)}
+      APP_PASSWORD: ${APP_PASSWORD:-}
       BROKER: ${BROKER:-DHAN}
-      DHAN_REDIRECT_URL: ${DHAN_REDIRECT_URL:-}
+      DHAN_REDIRECT_URL: ${DHAN_REDIRECT_URL:-https://trade.itspar.com/api/dhan/oauth/callback}
       CRYPTO_USDINR: ${CRYPTO_USDINR:-93}
       CRYPTO_LEVERAGE: ${CRYPTO_LEVERAGE:-10}
       SQUARE_OFF_IST: ${SQUARE_OFF_IST:-15:15}
       LOG_LEVEL: info
     expose:
-      - "4000"   # Coolify's proxy routes your domain (HTTPS) here; no host port is opened
+      - "4000"
+    labels:
+      caddy: https://trade.itspar.com
+      caddy.reverse_proxy: "{{upstreams 4000}}"
+      caddy.encode: zstd gzip
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
     volumes:
-      - trader-data:/app/data   # Dhan/TOTP creds, settings, Claude login (keep private, back up)
+      - trader-data:/app/data   # Dhan/TOTP creds, settings, session key, Claude login (keep private, back up)
+
 volumes:
   trader-data:

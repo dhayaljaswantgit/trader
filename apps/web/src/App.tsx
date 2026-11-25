@@ -14,7 +14,7 @@ import { Chat } from "./pages/Chat.tsx";
 
 export type Health = {
   db: boolean; mode: string; marketOpen: boolean; serverTime: string; broker: { source: "MOCK" | "DHAN"; connected: boolean; detail: string };
-  engine: { running: boolean; lastTick: string | null; lastError: string | null; ticks: number }; venue?: Venue; engines?: { DHAN: boolean; DELTA: boolean };
+  engine: { running: boolean; lastTick: string | null; lastError: string | null; ticks: number }; venue?: Venue; liveTrading?: boolean; engines?: { DHAN: boolean; DELTA: boolean };
   instruments: { running: boolean; lastSync: string | null; total: number; error: string | null }; token: { configured: boolean; clientIdMasked: string | null; expiresAt: string | null };
 };
 
@@ -53,7 +53,10 @@ export function App() {
   };
   const tokenExp = h?.token.expiresAt ? (Date.parse(h.token.expiresAt) - Date.now()) / 3600000 : null;
 
-  return <div className="layout">
+  const { data: me } = usePoll<{ email: string | null }>("/api/me", 600000);
+  const [menu, setMenu] = useState(false);
+  return <div className={`layout ${menu ? "menu-open" : ""}`}>
+    {menu && <div className="side-scrim" onClick={() => setMenu(false)} />}
     <aside className="side">
       <div className="venue-switch" role="tablist" aria-label="Exchange">
         {(["DHAN", "DELTA"] as const).map(v => <button key={v} role="tab" aria-selected={venue === v} className={venue === v ? "on" : ""} onClick={() => switchVenue(v)}
@@ -62,12 +65,14 @@ export function App() {
       </div>
       {h?.engines && (["DHAN", "DELTA"] as const).filter(v => v !== venue && h.engines![v]).map(v => <div key={v} className="venue-bg">● {v === "DHAN" ? "Dhan" : "Delta"} engine background mein chal raha hai</div>)}
       <div className="brand"><div className="logo">◆</div><div>AI Trader<small className="brand-sub">{venue === "DELTA" ? "₿ Delta Exchange · crypto" : "🇮🇳 Dhan · NSE / BSE"}</small></div></div>
-      {PAGES.map(([id, ic, label]) => <button key={id} className={`nav ${page === id ? "active" : ""}`} onClick={() => go(id)}><span className="ic">{ic}</span>{label}</button>)}
-      <div className="foot">Paper-only build · no real orders<br />Display: IST · Storage: UTC</div>
+      {PAGES.map(([id, ic, label]) => <button key={id} className={`nav ${page === id ? "active" : ""}`} onClick={() => { go(id); setMenu(false); }}><span className="ic">{ic}</span>{label}</button>)}
+      {me?.email && <div className="foot me">{me.email}<br /><a href="/auth/logout">Sign out</a></div>}
+      <div className="foot">Dhan: paper ya LIVE (Dashboard) · Delta: paper<br />Display: IST · Storage: UTC</div>
     </aside>
     <div className="main">
-      <div className="paper-strip" role="status">PAPER TRADING · Koi asli order nahi lagega · {venue === "DELTA" ? "₿ DELTA EXCHANGE · LIVE CRYPTO DATA · 24x7" : h?.broker.source === "MOCK" ? "SIMULATED PRICES (MOCK)" : "LIVE DHAN MARKET DATA"}</div>
+      {venue === "DHAN" && h?.liveTrading ? <div className="paper-strip live" role="status">🔴 LIVE TRADING ON (Dhan) · Engine ASLI orders lagayega · asli paisa</div> : <div className="paper-strip" role="status">PAPER TRADING · Koi asli order nahi lagega · {venue === "DELTA" ? "₿ DELTA EXCHANGE · LIVE CRYPTO DATA · 24x7" : h?.broker.source === "MOCK" ? "SIMULATED PRICES (MOCK)" : "LIVE DHAN MARKET DATA"}</div>}
       <header className="topbar">
+        <button className="hamburger" aria-label="Menu" onClick={() => setMenu(m => !m)}>☰</button>
         {page === "backtest"
           ? <div className="tabs page-tabs" role="tablist">
               <button role="tab" aria-selected={btTab === "lab"} className={btTab === "lab" ? "on" : ""} onClick={() => setBtTab("lab")}>⟲ Backtest Lab</button>

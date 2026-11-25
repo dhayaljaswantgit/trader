@@ -62,6 +62,10 @@ model Preferences {
   minOneLot        Boolean  @default(true)
   /// how many positions may be open at once on this exchange (engine + risk check)
   maxOpenPositions Int      @default(1)
+  /// REAL orders on Dhan (venue DHAN only). Off = paper.
+  liveTrading      Boolean  @default(false)
+  /// hard cap on lots per LIVE order
+  liveMaxLots      Int      @default(1)
   defaultCapital   Decimal  @default(100000) @db.Decimal(14, 2)
   defaultMaxLoss   Decimal  @default(1000) @db.Decimal(14, 2)
   defaultMaxProfit Decimal? @db.Decimal(14, 2)
@@ -174,6 +178,10 @@ model PaperTrade {
   /// Strategy Builder trades: { custom, specId, uKey, dir, uEntry, uStop, uTarget, entryT, tf, curStop }
   meta            Json?
   venue           String         @default("DHAN")
+  /// PAPER | LIVE (real Dhan order)
+  mode            String         @default("PAPER")
+  brokerOrderId   String?
+  exitOrderId     String?
   openedAt        DateTime       @default(now())
   closedAt        DateTime?
 

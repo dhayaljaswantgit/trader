@@ -249,6 +249,14 @@ describe("live safety", () => {
   it("health never exposes the token", async () => {
     const h = (await inject("GET", "/api/health")).body;
     expect(h).not.toMatch(/accessToken/);
-    expect(JSON.parse(h)).toMatchObject({ mode: "PAPER", liveExecutionAvailable: false });
+    expect(JSON.parse(h)).toMatchObject({ mode: "PAPER", liveTrading: false });
+  });
+  it("LIVE switch needs the typed confirm and is Dhan-only", async () => {
+    expect((await inject("PUT", "/api/preferences", { liveTrading: true })).statusCode).toBe(400);
+    expect((await inject("PUT", "/api/preferences?venue=DELTA", { liveTrading: true, liveConfirm: "LIVE" })).statusCode).toBe(400);
+    expect((await inject("PUT", "/api/preferences", { liveMaxLots: 50 })).statusCode).toBe(400);
+    const ok = await inject("PUT", "/api/preferences", { liveTrading: true, liveConfirm: "LIVE", liveMaxLots: 2 });
+    expect(ok.statusCode).toBe(200);
+    expect((await inject("PUT", "/api/preferences", { liveTrading: false })).statusCode).toBe(200);
   });
 });

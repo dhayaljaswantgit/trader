@@ -29,7 +29,7 @@ The Postgres host must be reachable **from inside the container**:
 
 1. **+ New Resource → Private Repository** (connect the GitHub App, or use a deploy key) → choose the repo.
 2. **Build Pack: Docker Compose**, with compose file `docker-compose.yml`.
-3. **Domains:** set e.g. `https://trader.yourdomain.com` (port 4000). Point that DNS record to the server. Coolify issues the HTTPS certificate.
+3. **Domains: leave EMPTY.** The Caddy labels in docker-compose.yml route `https://trade.itspar.com` → port 4000 and issue HTTPS. DNS: A record `trade` → server IP.
 4. **Environment Variables:**
 
    | Name | Value |
@@ -40,8 +40,21 @@ The Postgres host must be reachable **from inside the container**:
    | `BROKER` | `DHAN` |
    | `CRYPTO_USDINR` | `93` (optional) |
 
+   **Google sign-in (recommended)**: add these too. Then only the listed emails can open the app, and APP_USER/APP_PASSWORD are ignored.
+
+   | Name | Value |
+   |---|---|
+   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | from Google Cloud Console (see below) |
+   | `ALLOWED_EMAILS` | `you@gmail.com,friend@gmail.com` |
+   | `PUBLIC_URL` | `https://trade.itspar.com` |
+   | `SESSION_SECRET` | a long random string (`openssl rand -hex 32`) |
+
+   Google Cloud Console → APIs & Services → **OAuth consent screen** (External; add your emails as test users) → **Credentials → Create OAuth client ID → Web application**:
+   - Authorized redirect URI: `https://trade.itspar.com/auth/google/callback`
+   - For local testing, also add `http://localhost:4000/auth/google/callback`
+
 5. **Deploy.** The first build takes a few minutes. Database migrations run automatically on every start.
-6. Open **`https://trader.yourdomain.com`** and log in with APP_USER / APP_PASSWORD.
+6. Open **`https://trade.itspar.com`** and log in with APP_USER / APP_PASSWORD.
 
 ## 4. First-time setup in the app (on the server)
 
@@ -82,5 +95,5 @@ If the Postgres is a Coolify resource, its scheduled backups cover this database
 - The app is **PAPER only**. No live order route exists in the code.
 - The app is on the public internet: use a **long, random APP_PASSWORD**, and always HTTPS (never plain http). Optionally restrict the domain to your IP in Coolify/firewall.
 - `trader-data` contains your Dhan PIN and TOTP secret. Keep server SSH access locked down (key login only).
-- One-click consent login (Dhan API key flow) needs `DHAN_REDIRECT_URL=https://trader.yourdomain.com/api/dhan/oauth/callback`, set both in Coolify and on web.dhan.co. **Instant login (PIN + TOTP) needs nothing extra** and is recommended.
-- Health check: `https://trader.yourdomain.com/healthz` (no login needed, shows nothing private).
+- One-click consent login (Dhan API key flow) needs `DHAN_REDIRECT_URL=https://trade.itspar.com/api/dhan/oauth/callback`, set both in Coolify and on web.dhan.co. **Instant login (PIN + TOTP) needs nothing extra** and is recommended.
+- Health check: `https://trade.itspar.com/healthz` (no login needed, shows nothing private).

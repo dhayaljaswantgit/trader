@@ -14,6 +14,7 @@ export async function api<T = any>(url: string, init?: RequestInit & { json?: un
   const r = await fetch(url, { ...init, method: init?.method ?? (init?.json !== undefined ? "POST" : "GET"),
     headers: init?.json !== undefined ? { "content-type": "application/json" } : undefined, body: init?.json !== undefined ? JSON.stringify(init.json) : undefined });
   const text = await r.text(); let j: any = null; try { j = JSON.parse(text); } catch { j = text; }
+  if (r.status === 401 && j?.error === "LOGIN_REQUIRED") { window.location.href = "/login"; throw new Error("Login required"); }
   if (!r.ok) throw new Error(j?.issues?.join(", ") ?? j?.message ?? j?.error ?? `HTTP ${r.status}`);
   return j as T;
 }

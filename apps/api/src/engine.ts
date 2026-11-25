@@ -49,6 +49,27 @@ export class PaperEngine {
   get crypto() { return this.venue === "DELTA"; }
   /** Preferences row per venue: 1 = Dhan, 2 = Delta. */
   get prefId() { return this.crypto ? 2 : 1; }
+
+  /** LIVE = real Dhan orders. Only venue DHAN, only with the real Dhan data source, only when switched on. */
+  async liveCfg(): Promise<{ live: boolean; maxLots: number }> {
+    if (this.crypto || this.broker.source !== "DHAN") return { live: false, maxLots: 0 };
+    const p = await this.prisma.preferences.findUnique({ where: { id: this.prefId } });
+    return { live: !!p?.liveTrading, maxLots: Math.max(1, p?.liveMaxLots ?? 1) };
+  }
+  private exiting = new Set<string>();
+  /** Marketable LIMIT order (±1% of the touch) → wait up to ~8 s for a fill → cancel the rest. Returns the real fill. */
+  async liveExec(tag: string, key: string, side: "BUY" | "SELL", qty: number, ref: number, product: string, kind: string, existingId?: string | null) {
+    const [segment, securityId] = key.split(":") as [string, string];
+    const prod = product === "INTRADAY" ? "INTRADAY" : kind === "EQUITY" ? "CNC" : "MARGIN";
+    const price = Math.max(0.05, roundTick(side === "BUY" ? ref * 1.01 : ref * 0.99));
+    const id = existingId ?? await this.broker.dhan.placeOrder({ tag, side, segment, securityId, quantity: qty, product: prod, price });
+    this.log(`LIVE ${side} ${qty} × ${key} limit ${price} → Dhan order ${id}`);
+    let st = await this.broker.dhan.getOrder(id);
+    for (let i = 0; i < 8 && !["TRADED", "REJECTED", "CANCELLED", "EXPIRED"].includes(st.status); i++) { await new Promise(r => setTimeout(r, 1000)); st = await this.broker.dhan.getOrder(id); }
+    if (!["TRADED", "REJECTED", "CANCELLED", "EXPIRED"].includes(st.status)) { await this.broker.dhan.cancelOrder(id).catch(() => {}); st = await this.broker.dhan.getOrder(id); }
+    if (!st.filledQty || !st.avgPrice) throw new Error(`Dhan order ${id} ${st.status}${st.reason ? ` — ${st.reason}` : ""} (no fill)`);
+    return { orderId: id, qty: st.filledQty, avg: st.avgPrice, partial: st.filledQty < qty };
+  }
   isOpen() { return this.crypto || marketOpen(this.clock()); }
 
   log(msg: string) { this.status.log.unshift(`${toIstHHMM(this.clock())} ${msg}`); this.status.log.length = Math.min(this.status.log.length, 60); }
@@ -147,7 +168,7 @@ export class PaperEngine {
       const session = await this.ensureSession();
       await this.managePositions(session);
       if (monitorOnly || !this.status.running || !session) return;
-      this.status.lastError = null; // only errors from the current tick stay visible
+      if (!this.status.lastError?.startsWith("LIVE")) this.status.lastError = null; // tick errors clear; LIVE order failures stay until restart
       const prefs = await this.prisma.preferences.findUnique({ where: { id: this.prefId } });
       if (!prefs || !this.status.marketOpen) return;
       for (const key of prefs.instrumentKeys) {
@@ -229,7 +250,7 @@ export class PaperEngine {
             fillNote: `ATM by spot ${ch.spot}; Δ ${delta.toFixed(2)}${leg.delta == null ? " (assumed)" : ""}; IV ${leg.iv ?? "n/a"}` };
         }
         const q = c.quote, slip = config.slippageBps / 10000;
-        const fill = (kind === "CRYPTO" ? r2x : roundTick)(c.side === "LONG" ? (q.ask ?? q.ltp) * (1 + slip) : (q.bid ?? q.ltp) * (1 - slip));
+        let fill = (kind === "CRYPTO" ? r2x : roundTick)(c.side === "LONG" ? (q.ask ?? q.ltp) * (1 + slip) : (q.bid ?? q.ltp) * (1 - slip));
         const perUnit = Math.abs(fill - c.stop);
         const s = toDto(session), pnl = Number(s.realizedPnlInr) + Number(s.unrealizedPnlInr);
         const sz = meta?.sizing as { mode?: string; lots?: number; riskPct?: number; capitalPerLot?: number; maxLots?: number } | undefined;
@@ -258,7 +279,9 @@ export class PaperEngine {
           if (p1?.minOneLot && oneLotRisk <= remaining) { lots = 1; minLot = true; this.log(`${u.symbol}: ${riskPct}% budget ₹${budget.toFixed(0)} < 1 lot risk ₹${oneLotRisk.toFixed(0)} → minimum 1 lot (aaj ke bache max-loss ₹${remaining.toFixed(0)} ke andar)`); }
         }
         if (kind === "CRYPTO") lots = Math.min(lots, Math.floor(Number(s.capitalInr) * config.cryptoLeverage / fill)); // never above capital × leverage
-        const qty = lots * c.lot;
+        const lc = await this.liveCfg(), live = lc.live && kind !== "CRYPTO";
+        if (live && lots > lc.maxLots) { this.log(`${u.symbol}: LIVE lots ${lots} → ${lc.maxLots} (live max lots)`); lots = lc.maxLots; }
+        let qty = lots * c.lot;
         if (qty <= 0) { rejections.push(sz && (sz.mode === "fixed" || sz.mode === "capital") ? `${kind}: capital ₹${Number(s.capitalInr).toFixed(0)} < ₹ per lot` : `${kind}: risk budget ₹${budget.toFixed(0)} < 1 lot risk ₹${(perUnit * c.lot).toFixed(0)}`); continue; }
         const intent: OrderIntent = { correlationId: `${correlationId}|${kind}`, mode: "PAPER", securityId: c.key, side: c.side === "LONG" ? "BUY" : "SELL", quantity: qty, lotSize: c.lot,
           limitPrice: fill.toFixed(2), stopPrice: c.stop.toFixed(2), isEntry: true, strategyVersion: sig.strategyVersion, kind: (kind === "CRYPTO" ? "FUTURES" : kind) as OrderIntent["kind"], product };
@@ -274,12 +297,25 @@ export class PaperEngine {
         if (!d.approved) { rejections.push(`${kind}: ${d.reasons.join("; ")}`); continue; }
         const created = await this.prisma.orderIntent.create({ data: { correlationId: intent.correlationId, mode: "PAPER", instrumentKey: c.key, side: intent.side, quantity: qty, limitPrice: fill, state: "FILLED" } }).catch(() => null);
         if (!created) return; // duplicate intent → already handled
+        let brokerOrderId: string | null = null, liveNote = "";
+        if (live) {
+          try {
+            const r = await this.liveExec(intent.correlationId.slice(-25), c.key, intent.side, qty, c.side === "LONG" ? (q.ask ?? q.ltp) : (q.bid ?? q.ltp), product, kind);
+            brokerOrderId = r.orderId; fill = r.avg; qty = r.qty; liveNote = `LIVE Dhan order ${r.orderId}${r.partial ? " (partial fill)" : ""}, avg ${r.avg}. `;
+            await this.prisma.orderIntent.update({ where: { correlationId: intent.correlationId }, data: { mode: "LIVE", limitPrice: fill, quantity: qty } }).catch(() => {});
+          } catch (e) {
+            await this.prisma.orderIntent.update({ where: { correlationId: intent.correlationId }, data: { state: "REJECTED" } }).catch(() => {});
+            this.status.lastError = `LIVE ENTRY FAILED ${c.contract}: ${(e as Error).message}${/DH-905|Invalid IP/i.test((e as Error).message) ? " — Dhan par is machine ka static IP whitelist karein" : ""}`;
+            await this.audit("LIVE_ENTRY_FAILED", { contract: c.contract, error: (e as Error).message }, intent.correlationId);
+            rejections.push(`${kind}: LIVE order failed — ${(e as Error).message}`); break;
+          }
+        }
         const pk: ProductKind = kind === "CRYPTO" ? "CRYPTO_PERP" : kind === "OPTIONS" ? "OPTIONS" : kind === "FUTURES" ? "FUTURES" : product === "INTRADAY" ? "EQUITY_INTRADAY" : "EQUITY_DELIVERY";
         const t = await this.prisma.paperTrade.create({ data: { sessionId: session.id, correlationId: intent.correlationId, strategyId: label ?? `${sig.strategyId}@${style}`, underlying: u.symbol, venue: this.venue, ...(meta ? { meta: meta as object } : {}),
-          instrumentKey: c.key, contract: c.contract, kind, product: kind === "CRYPTO" ? "CRYPTO_24x7" : product, side: c.side, quantity: qty, lotSize: c.lot, entryPrice: fill, stopPrice: c.stop, targetPrice: c.target, lastPrice: fill,
-          entryCharges: orderCharges(pk, intent.side, fill * qty), dataSource: q.source, fillNote: `Filled at ${c.side === "LONG" ? "ask" : "bid"} + ${config.slippageBps}bps slippage. ${c.fillNote}` } });
-        await this.audit("PAPER_ENTRY", { contract: c.contract, side: c.side, qty, fill, stop: c.stop, target: c.target, strategy: t.strategyId }, intent.correlationId);
-        this.log(`ENTRY ${c.side} ${qty} × ${c.contract} @ ${fill} (SL ${c.stop}, TGT ${c.target})`);
+          instrumentKey: c.key, contract: c.contract, kind, product: kind === "CRYPTO" ? "CRYPTO_24x7" : product, side: c.side, quantity: qty, lotSize: c.lot, entryPrice: fill, stopPrice: c.stop, targetPrice: c.target, lastPrice: fill, mode: live ? "LIVE" : "PAPER", brokerOrderId,
+          entryCharges: orderCharges(pk, intent.side, fill * qty), dataSource: q.source, fillNote: live ? `${liveNote}${c.fillNote}` : `Filled at ${c.side === "LONG" ? "ask" : "bid"} + ${config.slippageBps}bps slippage. ${c.fillNote}` } });
+        await this.audit(live ? "LIVE_ENTRY" : "PAPER_ENTRY", { contract: c.contract, side: c.side, qty, fill, stop: c.stop, target: c.target, strategy: t.strategyId }, intent.correlationId);
+        this.log(`${live ? "🔴 LIVE " : ""}ENTRY ${c.side} ${qty} × ${c.contract} @ ${fill} (SL ${c.stop}, TGT ${c.target})`);
         return;
       } catch (e) { rejections.push(`${kind}: ${(e as Error).message}`); }
     }
@@ -363,7 +399,22 @@ export class PaperEngine {
   async closeTrade(t: PaperTrade, q: LiveQuote | undefined, reason: string, at?: number) {
     const slip = config.slippageBps / 10000;
     const base = at ?? (t.side === "LONG" ? (q?.bid ?? q?.ltp) : (q?.ask ?? q?.ltp)) ?? Number(t.lastPrice);
-    const px = (t.kind === "CRYPTO" ? r2x : roundTick)(t.side === "LONG" ? base * (1 - slip) : base * (1 + slip));
+    let px = (t.kind === "CRYPTO" ? r2x : roundTick)(t.side === "LONG" ? base * (1 - slip) : base * (1 + slip));
+    if (t.mode === "LIVE") {
+      if (this.exiting.has(t.id)) return; this.exiting.add(t.id);
+      try {
+        const r = await this.liveExec(`X${t.correlationId}`.slice(-25), t.instrumentKey, t.side === "LONG" ? "SELL" : "BUY", t.quantity, base, t.product, t.kind, t.exitOrderId);
+        if (r.partial) { // part closed: keep the rest open, retry next tick
+          await this.prisma.paperTrade.update({ where: { id: t.id }, data: { quantity: t.quantity - r.qty, exitOrderId: null } });
+          this.log(`LIVE EXIT partial ${r.qty}/${t.quantity} ${t.contract} — baaki next tick`); await this.audit("LIVE_EXIT_PARTIAL", { contract: t.contract, filled: r.qty, reason }, t.correlationId); return;
+        }
+        px = r.avg; await this.prisma.paperTrade.update({ where: { id: t.id }, data: { exitOrderId: r.orderId } });
+      } catch (e) {
+        await this.prisma.paperTrade.update({ where: { id: t.id }, data: { exitOrderId: null } }).catch(() => {});
+        this.status.lastError = `LIVE EXIT FAILED ${t.contract}: ${(e as Error).message} — Dhan app mein check karein!`;
+        this.log(`⚠️ ${this.status.lastError}`); await this.audit("LIVE_EXIT_FAILED", { contract: t.contract, reason, error: (e as Error).message }, t.correlationId); return;
+      } finally { this.exiting.delete(t.id); }
+    }
     const exitCh = orderCharges(this.productKind(t), t.side === "LONG" ? "SELL" : "BUY", px * t.quantity);
     const gross = new Decimal(px).minus(t.entryPrice).times(t.side === "LONG" ? 1 : -1).times(t.quantity);
     const pnl = gross.minus(t.entryCharges).minus(exitCh);
@@ -371,7 +422,7 @@ export class PaperEngine {
     if (!upd.count) return;
     const s = await this.currentSession();
     if (s) await this.prisma.tradingSession.update({ where: { id: s.id }, data: { realizedPnlInr: { increment: pnl }, consecutiveLosses: pnl.lte(0) ? { increment: 1 } : 0 } });
-    await this.audit("PAPER_EXIT", { contract: t.contract, reason, exit: px, pnl: pnl.toFixed(2) }, t.correlationId);
+    await this.audit(t.mode === "LIVE" ? "LIVE_EXIT" : "PAPER_EXIT", { contract: t.contract, reason, exit: px, pnl: pnl.toFixed(2) }, t.correlationId);
     this.log(`EXIT ${t.contract} @ ${px} — ${reason} — P&L ₹${pnl.toFixed(2)}`);
   }
 
