@@ -83,26 +83,38 @@ const baseChart = (el: HTMLElement, h: number): IChartApi => createChart(el, {
 const ist = (t: number) => (t + 19800) as UTCTimestamp;
 
 export type Bar = { t: number; o: number; h: number; l: number; c: number; v: number };
-export function CandleChart({ bars, overlays, markers, height = 380, fill }: { bars: Bar[]; overlays?: Array<{ name: string; color: string; data: Array<number | null> }>; markers?: Array<{ t: number; up: boolean; text: string }>; height?: number; fill?: boolean }) {
+export function CandleChart({ bars, overlays, markers, height = 380, fill, showFrom, viewKey }: { bars: Bar[]; overlays?: Array<{ name: string; color: string; data: Array<number | null> }>; markers?: Array<{ t: number; up: boolean; text: string }>; height?: number; fill?: boolean; /** unix sec: initial view starts here (older bars = indicator warm-up, still scrollable) */ showFrom?: number; /** view (zoom/scroll) resets only when this changes, e.g. symbol+interval — not on every data refresh */ viewKey?: string }) {
   const ref = useRef<HTMLDivElement>(null);
+  const st = useRef<{ ch: ReturnType<typeof baseChart>; cs: any; vs: any; lines: Map<string, any>; viewKey?: string; fitted: boolean } | null>(null);
+  // create the chart once per height (not per data refresh)
   useEffect(() => {
-    if (!ref.current || !bars.length) return;
+    if (!ref.current) return;
     const ch = baseChart(ref.current, height);
     const cs = ch.addCandlestickSeries({ upColor: css("--up"), downColor: css("--down"), borderVisible: false, wickUpColor: css("--up"), wickDownColor: css("--down") });
-    cs.setData(bars.map(b => ({ time: ist(b.t), open: b.o, high: b.h, low: b.l, close: b.c })));
-    if (bars.some(b => b.v > 0)) {
-      const vs = ch.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" } });
-      ch.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-      vs.setData(bars.map(b => ({ time: ist(b.t), value: b.v, color: b.c >= b.o ? "#2fd08a40" : "#ff5d7340" })));
-    }
+    const vs = ch.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" } });
+    ch.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    st.current = { ch, cs, vs, lines: new Map(), fitted: false };
+    return () => { ch.remove(); st.current = null; };
+  }, [height]);
+  // update data in place — keeps the user's zoom/scroll
+  useEffect(() => {
+    const S = st.current; if (!S || !bars.length) return;
+    S.cs.setData(bars.map(b => ({ time: ist(b.t), open: b.o, high: b.h, low: b.l, close: b.c })));
+    S.vs.setData(bars.some(b => b.v > 0) ? bars.map(b => ({ time: ist(b.t), value: b.v, color: b.c >= b.o ? "#2fd08a40" : "#ff5d7340" })) : []);
+    const names = new Set((overlays ?? []).map(o => o.name));
+    for (const [n, ls] of S.lines) if (!names.has(n)) { S.ch.removeSeries(ls); S.lines.delete(n); }
     for (const o of overlays ?? []) {
-      const ls = ch.addLineSeries({ color: o.color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: o.name });
+      let ls = S.lines.get(o.name);
+      if (!ls) { ls = S.ch.addLineSeries({ color: o.color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: o.name }); S.lines.set(o.name, ls); }
       ls.setData(bars.flatMap((b, i) => (o.data[i] == null ? [] : [{ time: ist(b.t), value: o.data[i]! }])));
     }
-    if (markers?.length) cs.setMarkers(markers.map(m => ({ time: ist(m.t), position: m.up ? "belowBar" : "aboveBar", color: m.up ? css("--up") : css("--down"), shape: m.up ? "arrowUp" : "arrowDown", text: m.text })));
-    ch.timeScale().fitContent();
-    return () => ch.remove();
-  }, [bars, overlays, markers, height]);
+    S.cs.setMarkers((markers ?? []).map(m => ({ time: ist(m.t), position: m.up ? "belowBar" : "aboveBar", color: m.up ? css("--up") : css("--down"), shape: m.up ? "arrowUp" : "arrowDown", text: m.text })));
+    if (!S.fitted || S.viewKey !== viewKey) { // first load or symbol/interval changed → set the view
+      const first = showFrom ? bars.findIndex(b => b.t >= showFrom) : -1;
+      if (first > 0) S.ch.timeScale().setVisibleLogicalRange({ from: first, to: bars.length + 2 }); else S.ch.timeScale().fitContent();
+      S.fitted = true; S.viewKey = viewKey;
+    }
+  }, [bars, overlays, markers, showFrom, viewKey, height]);
   return <div ref={ref} className="chart" style={{ height: fill ? "100%" : height }} />;
 }
 export function LineChart({ points, height = 240, baseline }: { points: Array<{ t: number; v: number }>; height?: number; baseline?: number }) {

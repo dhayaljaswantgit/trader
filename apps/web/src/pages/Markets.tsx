@@ -16,9 +16,17 @@ function ChartPane({ pane, items, onChange, active, onActivate, height, fullscre
   pane: Pane; items: Item[]; onChange: (p: Pane) => void; active: boolean; onActivate: () => void; height: number; fullscreen: boolean; onFullscreen: () => void; showStats: boolean;
 }) {
   const key = pane.key ?? items[0]?.key ?? null;
-  const days = pane.iv === "D" ? 365 : pane.iv === "1" ? 2 : pane.iv === "60" ? 20 : 4;
-  const { data: c, error } = usePoll<{ bars: Bar[]; ema9: number[]; ema21: number[]; vwap: number[]; symbol: string; source: string }>(key ? `/api/candles?key=${encodeURIComponent(key)}&interval=${pane.iv}&days=${days}` : null, 30000);
-  const overlays = useMemo(() => c ? [{ name: "VWAP", color: "#ffb547", data: c.vwap }, { name: "EMA 9", color: "#5cc8ff", data: c.ema9 }, { name: "EMA 21", color: "#a78bfa", data: c.ema21 }] : [], [c]);
+  const days = pane.iv === "D" ? 365 : pane.iv === "1" ? 2 : pane.iv === "60" ? 20 : 4; // what the chart shows
+  // extra history so EMA 200 is already settled at the left edge of the view
+  const loadDays = pane.iv === "D" ? 730 : pane.iv === "1" ? 3 : pane.iv === "60" ? 90 : pane.iv === "15" ? 30 : 12;
+  const { data: c, error } = usePoll<{ bars: Bar[]; ema9: number[]; ema21: number[]; vwap: number[]; symbol: string; source: string }>(key ? `/api/candles?key=${encodeURIComponent(key)}&interval=${pane.iv}&days=${loadDays}` : null, 30000);
+  const overlays = useMemo(() => {
+    if (!c) return [];
+    const ema = (n: number) => { const k = 2 / (n + 1); let e: number | null = null; return c.bars.map((b, i) => (e = e == null ? b.c : b.c * k + e * (1 - k), i >= n - 1 ? e : null)); };
+    return [{ name: "VWAP", color: "#ffb547", data: c.vwap }, { name: "EMA 9", color: "#5cc8ff", data: c.ema9 }, { name: "EMA 21", color: "#a78bfa", data: c.ema21 },
+      { name: "EMA 50", color: "#2fd08a", data: ema(50) }, { name: "EMA 100", color: "#ff8a3d", data: ema(100) }, { name: "EMA 200", color: "#ff5d73", data: ema(200) }];
+  }, [c]);
+  const showFrom = useMemo(() => Math.floor(Date.now() / 1000) - days * 86400, [days, c]);
   const cur = items.find(i => i.key === key);
   return <div className="card" onClick={onActivate} style={{ padding: 12, outline: active ? "2px solid var(--accent)" : "none", outlineOffset: -1, display: "flex", flexDirection: "column", minHeight: 0, height: fullscreen ? "100%" : undefined, overflow: "hidden" }}>
     <div className="card-head" style={{ marginBottom: 8, gap: 8 }}>
@@ -30,7 +38,7 @@ function ChartPane({ pane, items, onChange, active, onActivate, height, fullscre
       <button className="btn sm" onClick={e => { e.stopPropagation(); onFullscreen(); }} title={fullscreen ? "Exit full screen (Esc)" : "Full screen"} aria-label="Toggle full screen">{fullscreen ? "✕" : "⛶"}</button>
     </div>
     <div style={{ flex: 1, minHeight: 0 }}>
-      {error ? <div className="note bad">{error}</div> : c?.bars.length ? <CandleChart bars={c.bars} overlays={overlays} height={height} fill={fullscreen} /> : <div className="empty" style={{ height: fullscreen ? "100%" : height }}>Candles load ho rahe hain…</div>}
+      {error ? <div className="note bad">{error}</div> : c?.bars.length ? <CandleChart bars={c.bars} overlays={overlays} height={height} fill={fullscreen} showFrom={showFrom} viewKey={`${key}|${pane.iv}`} /> : <div className="empty" style={{ height: fullscreen ? "100%" : height }}>Candles load ho rahe hain…</div>}
     </div>
     {showStats && cur?.indicators && <div className="kpis" style={{ marginTop: 10 }}>
       {[["VWAP", fmt(cur.indicators.vwap)], ["EMA 9 / 21", `${fmt(cur.indicators.ema9)} / ${fmt(cur.indicators.ema21)}`], ["RSI 14", fmt(cur.indicators.rsi14, 1)], ["ATR 14", fmt(cur.indicators.atr14)], ["ADX 14", fmt(cur.indicators.adx14, 1)], ["Rel. volume", cur.indicators.relVolume ? cur.indicators.relVolume.toFixed(2) + "×" : "n/a"]]
@@ -91,7 +99,7 @@ export function Markets() {
     {(error || data?.error) && <div className="note bad">{error || data?.error}</div>}
     <section className="card" style={{ padding: 14 }}>
       <div className="card-head" style={{ marginBottom: 12 }}>
-        <h2>Charts <span className="sub">completed candles · VWAP / EMA9 / EMA21 · IST{layout > 1 ? " · watchlist row click = highlighted chart badlega" : ""}</span></h2>
+        <h2>Charts <span className="sub">completed candles · VWAP · EMA 9/21/50/100/200 · IST{layout > 1 ? " · watchlist row click = highlighted chart badlega" : ""}</span></h2>
         <span className="muted" style={{ fontSize: 12 }}>Layout</span>
         <div className="tabs">{Object.entries(LAYOUTS).map(([n, l]) => <button key={n} className={layout === Number(n) ? "on" : ""} onClick={() => setLayout(Number(n))}>{l.label}</button>)}</div>
         <Switch on={showChain} onChange={setShowChain} label="Option chain" />
