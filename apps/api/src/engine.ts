@@ -279,6 +279,10 @@ export class PaperEngine {
           if (p1?.minOneLot && oneLotRisk <= remaining) { lots = 1; minLot = true; this.log(`${u.symbol}: ${riskPct}% budget ₹${budget.toFixed(0)} < 1 lot risk ₹${oneLotRisk.toFixed(0)} → minimum 1 lot (aaj ke bache max-loss ₹${remaining.toFixed(0)} ke andar)`); }
         }
         if (kind === "CRYPTO") lots = Math.min(lots, Math.floor(Number(s.capitalInr) * config.cryptoLeverage / fill)); // never above capital × leverage
+        if (kind === "OPTIONS" || (kind === "EQUITY" && product === "CARRY_FORWARD")) { // full premium/cost must fit the capital → fewer lots instead of rejecting
+          const fit = Math.floor(Number(s.capitalInr) / (fill * c.lot));
+          if (fit >= 1 && lots > fit) { this.log(`${u.symbol}: lots ${lots} → ${fit} (premium ₹${(fill * c.lot).toFixed(0)}/lot, capital ₹${Number(s.capitalInr).toFixed(0)})`); lots = fit; }
+        }
         const lc = await this.liveCfg(), live = lc.live && kind !== "CRYPTO";
         if (live && lots > lc.maxLots) { this.log(`${u.symbol}: LIVE lots ${lots} → ${lc.maxLots} (live max lots)`); lots = lc.maxLots; }
         let qty = lots * c.lot;
