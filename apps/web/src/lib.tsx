@@ -2,7 +2,15 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom";
 import { createChart, type IChartApi, type UTCTimestamp, ColorType, CrosshairMode } from "lightweight-charts";
 
+/** Active exchange for this browser tab. Every /api/ call carries ?venue=… so the server uses that exchange's session, setup, engine and trades. */
+export type Venue = "DHAN" | "DELTA";
+let VENUE: Venue = (() => { try { return localStorage.getItem("venue") === "DELTA" ? "DELTA" : "DHAN"; } catch { return "DHAN"; } })();
+export const getVenue = () => VENUE;
+export const setVenue = (v: Venue) => { VENUE = v; try { localStorage.setItem("venue", v); } catch { /* ignore */ } };
+export const withVenue = (url: string) => url.startsWith("/api/") && !/[?&]venue=/.test(url) ? `${url}${url.includes("?") ? "&" : "?"}venue=${VENUE}` : url;
+
 export async function api<T = any>(url: string, init?: RequestInit & { json?: unknown }): Promise<T> {
+  url = withVenue(url);
   const r = await fetch(url, { ...init, method: init?.method ?? (init?.json !== undefined ? "POST" : "GET"),
     headers: init?.json !== undefined ? { "content-type": "application/json" } : undefined, body: init?.json !== undefined ? JSON.stringify(init.json) : undefined });
   const text = await r.text(); let j: any = null; try { j = JSON.parse(text); } catch { j = text; }
@@ -44,7 +52,8 @@ export function MultiSelect<T extends string>({ options, value, onChange }: { op
 
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   useEffect(() => { const k = (e: KeyboardEvent) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
-  return <div className="modal-bg" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}><h3>{title}</h3>{children}</div></div>;
+  // portal to <body> so a dialog opened from a table cell does not inherit its alignment / nowrap
+  return createPortal(<div className="modal-bg" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}><h3>{title}</h3>{children}</div></div>, document.body);
 }
 
 /** Typed-confirmation dialog for destructive actions */
@@ -199,3 +208,20 @@ export function SymbolPicker({ items, value, onChange, width, size = "sm" }: { i
     right: i.quote ? fmt(i.quote.ltp) : "—", rightSub: <span className={i.changePct === null ? "dim" : i.changePct >= 0 ? "up" : "down"}>{pct(i.changePct, 2)}</span> }));
   return <Select options={options} value={value} onChange={onChange} search width={width ?? 150} size={size} placeholder="Select symbol" ariaLabel="Symbol" />;
 }
+
+export type CryptoInst = { key: string; symbol: string; name: string; instrumentType: string; contractValue: string | null };
+/** Delta Exchange perpetuals (BTCUSD, ETHUSD, …), majors first. */
+export function useCrypto(): CryptoInst[] {
+  const { data } = usePoll<CryptoInst[]>("/api/instruments?kind=CRYPTO_PERP&limit=400", 0);
+  const majors = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BNBUSD", "DOGEUSD"];
+  return [...(data ?? [])].sort((a, b) => ((majors.indexOf(a.symbol) + 1 || 99) - (majors.indexOf(b.symbol) + 1 || 99)) || a.symbol.localeCompare(b.symbol));
+}
+
+/** One click → Dhan's official login page; Dhan sends the browser back to the app with a fresh token. */
+export async function authorizeDhan() {
+  const r = await api<{ url: string }>("/api/dhan/oauth/start", { method: "POST" });
+  window.location.href = r.url;
+}
+
+/** Instant login (Client ID + PIN + TOTP set up once) — no browser, one click. */
+export const loginDhan = () => api<{ ok: boolean; client: string | null }>("/api/dhan/login", { method: "POST" });

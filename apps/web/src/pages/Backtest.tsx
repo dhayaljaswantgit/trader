@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { GUIDE } from "./strategyGuide.ts";
-import { api, usePoll, fmt, inr, Pnl, LineChart, istDateTime, Select, Modal } from "../lib.tsx";
+import { api, usePoll, fmt, inr, Pnl, LineChart, istDateTime, Select, Modal, useCrypto } from "../lib.tsx";
 import { StrategyBoard } from "./StrategyBoard.tsx";
 
 type M = { trades: number; winRate: number | null; avgWin: number | null; avgLoss: number | null; expectancy: number | null; expectancyCI90: [number, number] | null; profitFactor: number | null; netPnl: number; returnPct: number; maxDrawdownPct: number; sharpe: number | null; sortino: number | null; maxConsecLosses: number; exposurePct: number; totalCharges: number };
-export type R = { id: string; label: string; bars: number; from: number; to: number; tradeCount: number; metrics: M; inSample: M; outOfSample: M; buyHoldReturnPct: number; equity: Array<{ t: number; equity: number }>; trades: any[]; slippageSensitivity: Array<{ slippageBps: number; netPnl: number; expectancy: number | null }>; assumptions: string[] ; daily?: Array<{ day: string; trades: number; wins: number; gross: number; charges: number; net: number }>; config?: { product?: string } };
+export type R = { id: string; label: string; bars: number; from: number; to: number; tradeCount: number; metrics: M; inSample: M; outOfSample: M; buyHoldReturnPct: number; equity: Array<{ t: number; equity: number }>; trades: any[]; slippageSensitivity: Array<{ slippageBps: number; netPnl: number; expectancy: number | null }>; assumptions: string[] ; daily?: Array<{ day: string; trades: number; wins: number; gross: number; charges: number; net: number }>; config?: { product?: string } ; runConfig?: Record<string, any> };
 
 type Day = { day: string; trades: number; wins: number; gross: number; charges: number; net: number };
 function DailyPnl({ days }: { days: Day[] }) {
@@ -42,7 +42,9 @@ function DailyPnl({ days }: { days: Day[] }) {
   </section>;
 }
 
-export function ResultPage({ r, info, onClose }: { r: R; info?: { name: string; family: string; description: string }; onClose: () => void }) {
+export function ResultPage({ r, info, onClose, onUseFilters, onSaveFilter }: { r: R; info?: { name: string; family: string; description: string }; onClose: () => void;
+  /** load this run's settings into the Backtest Lab form */ onUseFilters?: () => void; /** save this run's settings as a named saved filter */ onSaveFilter?: (name: string) => void }) {
+  const [saving, setSaving] = useState(false); const [fname, setFname] = useState(r.label); const [saved, setSaved] = useState("");
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", k); document.body.style.overflow = "hidden";
     return () => { window.removeEventListener("keydown", k); document.body.style.overflow = ""; }; }, [onClose]);
   const Row = ({ m, label }: { m: M; label: string }) => <tr><td><b>{label}</b></td><td className="r num">{m.trades}</td><td className="r num">{m.winRate == null ? "—" : (m.winRate * 100).toFixed(1) + "%"}</td>
@@ -50,7 +52,14 @@ export function ResultPage({ r, info, onClose }: { r: R; info?: { name: string; 
   const capital = r.equity[0]?.equity ?? 0, gross = r.metrics.netPnl + r.metrics.totalCharges, g = info ? GUIDE[info.family] : undefined;
   const money = (v: number) => (v >= 0 ? "+" : "−") + inr(Math.abs(v), 0);
   return <div className="detail-page" role="dialog" aria-label="Backtest result"><div className="detail-inner">
-    <div className="card-head" style={{ marginBottom: 0 }}><button className="btn sm" onClick={onClose}>← Back</button><h2 style={{ margin: 0 }}>{r.label}</h2></div>
+    <div className="card-head" style={{ marginBottom: 0, gap: 8 }}><button className="btn sm" onClick={onClose}>← Back</button><h2 style={{ margin: "0 auto 0 0" }}>{r.label}</h2>
+      {onUseFilters && r.runConfig && <button className="btn sm primary" onClick={onUseFilters} title="Is backtest ki saari settings Backtest Lab form mein bhar do">⤴ Use these filters</button>}
+      {onSaveFilter && r.runConfig && !saving && <button className="btn sm" onClick={() => setSaving(true)} title="Is backtest ki settings ko naam dekar Saved filters mein rakho">💾 Save as filter</button>}
+      {saving && <span className="actions" style={{ gap: 6 }}><input className="input" style={{ width: 280, padding: "5px 10px" }} value={fname} onChange={e => setFname(e.target.value)} autoFocus />
+        <button className="btn sm primary" disabled={!fname.trim()} onClick={() => { onSaveFilter!(fname.trim()); setSaving(false); setSaved(fname.trim()); }}>Save</button>
+        <button className="btn sm" onClick={() => setSaving(false)}>Cancel</button></span>}
+      {saved && <span className="up" style={{ fontSize: 12 }}>✓ "{saved}" Saved filters mein add ho gaya</span>}</div>
+    {!r.runConfig && (onUseFilters || onSaveFilter) && <div className="note warn">Is purane backtest ki settings save nahi hui thi — filters load nahi ho sakte. Naya backtest chalayein.</div>}
     <section className="card">
       <h2>💰 Paisa — kitna laga, kitna bana</h2>
       <div className="money-flow">
@@ -105,7 +114,21 @@ export type BacktestTab = "lab" | "all";
 export function Backtest({ tab }: { tab: BacktestTab }) {
   const { data: prefs } = usePoll<any>("/api/preferences", 15000); // refresh so newly built strategies appear
   type Form = typeof DEFAULT_FORM;
-  const DEFAULT_FORM = { key: "", strategyId: "trend-breakout", style: "INTRADAY", interval: "D", years: "10", capital: "100000", riskPct: "1", slippageBps: "5", allowShort: true, sizingMode: "risk", capitalPerLot: "15000", lots: "1", slipPts: "0.5" };
+  const DEFAULT_FORM = { key: "", strategyId: "trend-breakout", style: "INTRADAY", interval: "D", years: "10", capital: "100000", riskPct: "1", slippageBps: "5", allowShort: true, sizingMode: "risk", capitalPerLot: "15000", lots: "1", slipPts: "0.5", leverage: "10" };
+  /** A saved run's config → Backtest Lab form (built-in and custom strategies). */
+  const formFromRun = (c: Record<string, any>, assumptions: string[] = [], label = ""): Form => {
+    // Older runs didn't store leverage / lots / raw crypto slippage — recover them from the result text and label.
+    const txt = assumptions.join(" ");
+    const levTxt = txt.match(/÷\s*(\d+(?:\.\d+)?)×\s*leverage/)?.[1];
+    const slipUsd = txt.match(/slippage\s+(\d+(?:\.\d+)?)\s*USD\/side/)?.[1];
+    const lotsTxt = label.match(/·\s*(\d+)\s*lot/)?.[1];
+    const oldFormat = c.custom && c.leverage === undefined;
+    return { ...DEFAULT_FORM,
+    key: c.key ?? DEFAULT_FORM.key, interval: c.daily ? "D" : String(c.interval ?? DEFAULT_FORM.interval), years: String(c.years ?? DEFAULT_FORM.years), capital: String(c.startingCapital ?? DEFAULT_FORM.capital),
+    ...(c.custom ? { strategyId: `custom:${c.specId}`, sizingMode: c.sizingMode ?? "fixed", riskPct: String(c.riskPct ?? DEFAULT_FORM.riskPct), lots: String(c.lots ?? lotsTxt ?? 1),
+        capitalPerLot: String(c.capitalPerLot ?? 15000), leverage: String(c.leverage ?? levTxt ?? 10), slipPts: String(oldFormat && slipUsd ? slipUsd : c.slippagePoints ?? 0.5) }
+      : { strategyId: c.strategyId ?? DEFAULT_FORM.strategyId, riskPct: String(c.riskPerTradePct ?? DEFAULT_FORM.riskPct), slippageBps: String(c.slippageBps ?? DEFAULT_FORM.slippageBps), style: c.style ?? DEFAULT_FORM.style }) };
+  };
   const loadLS = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? { ...d, ...JSON.parse(v) } : d; } catch { return d; } };
   const [f, setF] = useState<Form>(() => loadLS("btForm", DEFAULT_FORM));
   useEffect(() => { try { localStorage.setItem("btForm", JSON.stringify(f)); } catch { /* ignore */ } }, [f]);
@@ -115,13 +138,22 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
   const n10Id = (prefs?.strategyOptions ?? []).find((o: any) => o.custom && String(o.name).startsWith("N10"))?.id as string | undefined;
   // Suggested presets = the exact N10 setups from the sizing research (NIFTY 5-min, 5y, risk-based, ₹15k/lot, 0.5 pt slippage).
   const n10 = (cap: string, risk: string): Form => ({ ...DEFAULT_FORM, key: "IDX_I:13", strategyId: n10Id!, interval: "5", years: "5", style: "INTRADAY",
-    capital: cap, riskPct: risk, sizingMode: "risk", capitalPerLot: "15000", lots: "1", slipPts: "0.5" });
+    capital: cap, riskPct: risk, sizingMode: "risk", capitalPerLot: "15000", lots: "1", slipPts: "0.5", leverage: "10" });
   const suggested: Record<string, Form> = n10Id ? {
     "⭐ N10 · ₹1L · risk 2% (very risky)": n10("100000", "2"),
     "⭐ N10 · ₹3L · risk 1% (balanced)": n10("300000", "1"),
     "⭐ N10 · ₹5L · risk 1% (recommended)": n10("500000", "1"),
     "⭐ N10 · ₹5L · risk 0.5% (safest)": n10("500000", "0.5"),
   } : {};
+  // Crypto (Delta) presets from the Turtle 55/20 research — daily candles, 3 years, no/low leverage
+  const turtleId = (prefs?.strategyOptions ?? []).find((o: any) => o.custom && String(o.name).includes("Turtle 55/20"))?.id as string | undefined;
+  const turtle = (sym: "BTCUSD" | "ETHUSD", over: Partial<Form>): Form => ({ ...DEFAULT_FORM, key: `DELTA:${sym}`, strategyId: turtleId!, interval: "D", years: "3", style: "INTRADAY",
+    capital: "100000", riskPct: "2", sizingMode: "risk", leverage: "10", slipPts: sym === "BTCUSD" ? "2" : "0.2", ...over });
+  if (turtleId) Object.assign(suggested, {
+    "⭐ ₿ Turtle 55/20 · BTC · Daily · ₹1L · risk 2% (balanced)": turtle("BTCUSD", {}),
+    "⭐ ₿ Turtle 55/20 · ETH · Daily · ₹1L · risk 2% (balanced)": turtle("ETHUSD", {}),
+    "⭐ ₿ Turtle 55/20 · ETH · Daily · ₹1L · full capital 1× (aggressive)": turtle("ETHUSD", { sizingMode: "capital", leverage: "1" }),
+  });
   const allPresets = { ...suggested, ...presets };
   useEffect(() => { if (presetSel && allPresets[presetSel] && JSON.stringify({ ...DEFAULT_FORM, ...allPresets[presetSel] }) !== JSON.stringify(f)) setPresetSel(""); }, [f]); // eslint-disable-line react-hooks/exhaustive-deps
   const savePresets = (p: Record<string, Form>) => { setPresets(p); try { localStorage.setItem("btPresets", JSON.stringify(p)); } catch { /* ignore */ } };
@@ -129,6 +161,7 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
   const [r, setR] = useState<R | null>(null); const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
   const key = f.key || prefs?.selected.find((s: any) => s.instrumentType === "EQUITY")?.key || prefs?.selected[0]?.key || "";
   const custom = f.strategyId.startsWith("custom:");
+  const cryptoList = useCrypto(); const isCryptoKey = key.startsWith("DELTA:");
   const [applyOpen, setApplyOpen] = useState(false); const [onlyThis, setOnlyThis] = useState(true); const [applyMsg, setApplyMsg] = useState("");
   const capLots = Math.min(20, Math.floor(Number(f.capital) / (Number(f.capitalPerLot) || 15000)));
   const usedLots = f.sizingMode === "fixed" ? Math.min(Number(f.lots) || 1, capLots) : null;
@@ -145,7 +178,7 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
   };
   const run = async () => {
     setErr(""); setBusy(true);
-    const extra = custom ? { sizingMode: f.sizingMode, riskPct: Number(f.riskPct), capitalPerLot: Number(f.capitalPerLot), lots: Number(f.lots), slippagePoints: Number(f.slipPts) } : {};
+    const extra = custom ? { sizingMode: f.sizingMode, riskPct: Number(f.riskPct), capitalPerLot: Number(f.capitalPerLot), lots: Number(f.lots), slippagePoints: Number(f.slipPts), leverage: Number(f.leverage) || 10 } : {};
     try { setR(await api<R>("/api/backtest", { json: { ...f, ...extra, key, years: Number(f.years) } })); reloadRuns(); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
   const set = (k: string, v: unknown) => setF({ ...f, [k]: v });
@@ -158,7 +191,7 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
     <section className="card">
       <h2>⟲ Backtest Lab <span className="sub">— har strategy, 10 saal tak</span></h2>
       <div className="form-grid">
-        <div className="field"><span>Instrument</span><Select options={[...(prefs?.selected ?? []), ...((prefs?.selected ?? []).some((x: any) => x.key === "IDX_I:13") ? [] : [{ key: "IDX_I:13", symbol: "NIFTY", name: "Nifty 50", instrumentType: "INDEX" }])].map((s: any) => ({ value: s.key, label: s.symbol, sub: s.name, group: s.instrumentType === "INDEX" ? "Indices" : "Stocks" })).sort((a: any, b: any) => Number(a.group !== "Indices") - Number(b.group !== "Indices"))} value={key} onChange={v => set("key", v)} search placeholder="Instrument" ariaLabel="Instrument" /></div>
+        <div className="field"><span>Instrument</span><Select options={[...(prefs?.selected ?? []), ...((prefs?.selected ?? []).some((x: any) => x.key === "IDX_I:13") ? [] : [{ key: "IDX_I:13", symbol: "NIFTY", name: "Nifty 50", instrumentType: "INDEX" }]), ...cryptoList].map((s: any) => ({ value: s.key, label: s.symbol, sub: s.name, group: s.instrumentType === "INDEX" ? "Indices" : s.instrumentType === "CRYPTO_PERP" ? "₿ Crypto · Delta Exchange" : "Stocks" })).sort((a: any, b: any) => Number(a.group !== "Indices") - Number(b.group !== "Indices"))} value={key} onChange={v => set("key", v)} search placeholder="Instrument" ariaLabel="Instrument" /></div>
         <div className="field"><span>Strategy</span><Select search options={(prefs?.strategyOptions ?? []).map((s: any) => ({ value: s.id, label: s.name, sub: s.description, group: s.custom ? "⭐ My custom (Strategy Builder)" : s.family }))} value={f.strategyId} onChange={v => set("strategyId", v)} ariaLabel="Strategy" /></div>
         <div className="field"><span>Timeframe</span><Select options={[{ value: "D", label: "Daily", sub: "up to 10 years" }, { value: "15", label: "15-min", sub: "up to 5 years" }, { value: "5", label: "5-min", sub: "up to 5 years" }, { value: "1", label: "1-min scalping", sub: "up to 5 years" }]}
           value={f.interval} onChange={v => setF({ ...f, interval: v, years: v === "D" ? "10" : "1" })} ariaLabel="Timeframe" /></div>
@@ -168,16 +201,17 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
         {custom && <div className="field"><span>Lot sizing</span><Select value={f.sizingMode} onChange={v => set("sizingMode", v)} ariaLabel="Lot sizing" options={[
           { value: "risk", label: "Risk-based", sub: "stop hit ≈ Risk/trade % of capital" }, { value: "capital", label: "Capital-based", sub: "lots = capital ÷ ₹ per lot" },
           { value: "fixed", label: "Fixed lots", sub: "capital P&L ko change nahi karta" }]} /></div>}
-        {custom && f.sizingMode !== "fixed" && <label className="field"><span>₹ per lot (premium/margin)</span><input className="input num" value={f.capitalPerLot} onChange={e => set("capitalPerLot", e.target.value)} title="1 lot kharidne ke liye kitna paisa lagta hai (ATM NIFTY ≈ ₹15,000)" /></label>}
+        {custom && isCryptoKey && <label className="field"><span>Leverage (×) — margin per contract</span><input className="input num" value={f.leverage} onChange={e => set("leverage", e.target.value)} title="Margin per contract = notional ÷ leverage" /></label>}
+        {custom && !isCryptoKey && f.sizingMode !== "fixed" && <label className="field"><span>₹ per lot (premium/margin)</span><input className="input num" value={f.capitalPerLot} onChange={e => set("capitalPerLot", e.target.value)} title="1 lot kharidne ke liye kitna paisa lagta hai (ATM NIFTY ≈ ₹15,000)" /></label>}
         {custom && f.sizingMode === "fixed" && <label className="field"><span>Lots / trade</span><input className="input num" value={f.lots} onChange={e => set("lots", e.target.value)} /></label>}
         {(!custom || f.sizingMode === "risk") && <label className="field"><span>Risk / trade (%)</span><input className="input num" value={f.riskPct} onChange={e => set("riskPct", e.target.value)} /></label>}
-        {custom ? <label className="field"><span>Slippage (index pts / side)</span><input className="input num" value={f.slipPts} onChange={e => set("slipPts", e.target.value)} /></label>
+        {custom ? <label className="field"><span>{isCryptoKey ? "Slippage (USD / side)" : "Slippage (index pts / side)"}</span><input className="input num" value={f.slipPts} onChange={e => set("slipPts", e.target.value)} /></label>
           : <label className="field"><span>Slippage (bps / side)</span><input className="input num" value={f.slippageBps} onChange={e => set("slippageBps", e.target.value)} /></label>}
       </div>
       <div className="actions preset-bar" style={{ marginTop: 12, gap: 8, alignItems: "center" }}>
         <span className="muted" style={{ fontSize: 12 }}>💾 Saved filters:</span>
         {Object.keys(allPresets).length > 0 && <Select size="sm" width={260} value={presetSel} placeholder="Load saved filters…" ariaLabel="Saved filters"
-          onChange={n => { setPresetSel(n); if (allPresets[n]) setF({ ...DEFAULT_FORM, ...allPresets[n] }); }} options={Object.keys(allPresets).map(n => ({ value: n, label: n, group: n.startsWith("⭐") ? "Suggested (research)" : "My saved" }))} />}
+          onChange={n => { setPresetSel(n); if (allPresets[n]) setF({ ...DEFAULT_FORM, ...allPresets[n] }); }} options={Object.keys(allPresets).map(n => ({ value: n, label: n, group: n.startsWith("⭐ ₿") ? "₿ Crypto (Delta) — research" : n.startsWith("⭐") ? "🇮🇳 NIFTY (Dhan) — research" : "My saved" }))} />}
         {presetSel && presets[presetSel] && <button className="btn sm" onClick={() => { const p = { ...presets }; delete p[presetSel]; savePresets(p); setPresetSel(""); }}>✕ Delete "{presetSel}"</button>}
         <input className="input" style={{ width: 200, padding: "5px 10px" }} placeholder="Naam (e.g. N10 realistic 3L)" value={presetName} onChange={e => setPresetName(e.target.value)} />
         <button className="btn sm" disabled={!presetName.trim()} onClick={() => { const n = presetName.trim(); savePresets({ ...presets, [n]: f }); setPresetSel(n); setPresetName(""); }}>Save current filters</button>
@@ -200,7 +234,9 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
         <label className="actions" style={{ gap: 8, cursor: "pointer", marginBottom: 12 }}><input type="checkbox" checked={onlyThis} onChange={e => setOnlyThis(e.target.checked)} /> Sirf yahi strategy chalaye (baaki strategies untick)</label>
         <div className="actions" style={{ gap: 8 }}><button className="btn primary" onClick={applyLive}>✓ Apply to Trade Setup</button><button className="btn" onClick={() => setApplyOpen(false)}>Cancel</button></div>
       </Modal>}
-      <div className="note" style={{ marginTop: 12 }}>Daily = 10 saal tak (Dhan daily data listing se available). Intraday = max 5 saal (Dhan limit). Ye backtest <b>underlying price</b> par hai — option premium/theta/IV model nahi hai, isliye option P&L ka claim nahi karta.</div>
+      {key.startsWith("DELTA:") ? <div className="note" style={{ marginTop: 12 }}>₿ <b>Delta (crypto):</b> data Dec 2023 se available (~3 saal). Perpetual futures, 24x7, USD → ₹ fixed rate, fees 0.05% + GST, slippage USD mein. Funding payments model nahi hain.
+        Research: crypto par <b>intraday (1/5/15-min) lagbhag sab strategies loss</b> mein; <b>Daily</b> timeframe behtar.</div>
+        : <div className="note" style={{ marginTop: 12 }}>Daily = 10 saal tak (Dhan daily data listing se available). Intraday = max 5 saal (Dhan limit). Ye backtest <b>underlying price</b> par hai — option premium/theta/IV model nahi hai, isliye option P&L ka claim nahi karta.</div>}
     </section>
 
 
@@ -209,9 +245,7 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
       {!runs?.length ? <div className="empty">Abhi koi backtest nahi chalaya</div> : <div className="table-wrap" style={{ maxHeight: 420, overflowY: "auto" }}><table>
         <thead><tr><th>Kab</th><th>Instrument · Strategy · Timeframe · Period</th><th>Data</th><th className="r">Trades</th><th className="r">Win %</th><th className="r">Charges</th><th className="r">Net P&L</th><th className="r">Max DD</th><th></th><th></th></tr></thead>
         <tbody>{runs.map(x => <tr key={x.id} className={`click ${r?.id === x.id ? "sel" : ""}`} onClick={async () => { setErr(""); try { const res = await api<R & { runConfig?: any }>(`/api/backtests/${x.id}`); setR(res);
-            const c = res.runConfig; // put the saved run's settings back into the form so form and result match
-            if (c) setF(v => ({ ...v, key: c.key ?? v.key, strategyId: c.strategyId ?? v.strategyId, interval: c.daily ? "D" : String(c.interval ?? v.interval), years: String(c.years ?? v.years),
-              capital: String(c.startingCapital ?? v.capital), riskPct: String(c.riskPerTradePct ?? v.riskPct), slippageBps: String(c.slippageBps ?? v.slippageBps), style: c.style ?? v.style }));
+            if (res.runConfig) setF(formFromRun(res.runConfig, res.assumptions, res.label)); // form and result match
             } catch (e) { setErr((e as Error).message); } }}>
           <td className="num" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{istDateTime(x.createdAt)}</td><td><b>{x.label}</b></td>
           <td><span className={`pill ${x.dataSource === "DHAN" ? "UP" : "NO_TRADE"}`} title={x.dataSource === "MOCK" ? "Synthetic data — real market nahi" : "Real Dhan data"}>{x.dataSource}</span></td>
@@ -225,6 +259,8 @@ export function Backtest({ tab }: { tab: BacktestTab }) {
 
     {tab === "all" && prefs && <section className="card"><StrategyBoard readOnly instruments={prefs.selected} options={prefs.strategyOptions} value={[]} onChange={() => undefined} /></section>}
 
-    {r && <ResultPage r={r} info={info} onClose={() => setR(null)} />}
+    {r && <ResultPage r={r} info={info} onClose={() => setR(null)}
+      onUseFilters={() => { setF(formFromRun(r.runConfig!, r.assumptions, r.label)); setPresetSel(""); setR(null); setApplyMsg("⤴ Backtest ki settings filters mein load ho gayi — ab badal kar dobara chalayein ya 💾 Save karein."); window.scrollTo({ top: 0 }); }}
+      onSaveFilter={name => { savePresets({ ...presets, [name]: formFromRun(r.runConfig!, r.assumptions, r.label) }); }} />}
   </>;
 }

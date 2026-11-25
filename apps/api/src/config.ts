@@ -10,6 +10,10 @@ export const config = {
     autoExecutionEnabled: bool(process.env.AUTO_EXECUTION_ENABLED),
   },
   maxOpenPositions: num(process.env.MAX_OPEN_POSITIONS, 1),
+  /** USD → ₹ rate used to express crypto (Delta, USD-priced) backtests in rupees. Approximate; override with CRYPTO_USDINR. */
+  cryptoUsdInr: num(process.env.CRYPTO_USDINR, 85),
+  /** Default leverage for crypto backtests (margin per contract = notional ÷ leverage). */
+  cryptoLeverage: num(process.env.CRYPTO_LEVERAGE, 10),
   maxQuoteAgeMs: num(process.env.MAX_QUOTE_AGE_MS, 5000),
   maxSpreadPct: num(process.env.MAX_SPREAD_PCT, 2),
   entryCutoffIst: process.env.ENTRY_CUTOFF_IST ?? "15:00",
@@ -20,3 +24,14 @@ export const config = {
 
 // Hard rule for this build: whatever .env says, the system runs PAPER.
 export const EFFECTIVE_MODE = "PAPER" as const;
+
+// ---- Delta (crypto) runtime settings: editable from Settings, persisted in data/delta.json ----
+import { readFileSync as _rf, writeFileSync as _wf, mkdirSync as _mk } from "node:fs";
+import { resolve as _res, dirname as _dir } from "node:path";
+export const DELTA_SETTINGS_FILE = _res(process.env.DATA_DIR ?? _res(import.meta.dirname, "../../../data"), "delta.json");
+// tests never read the user's saved settings
+if (!process.env.VITEST) try { const j = JSON.parse(_rf(DELTA_SETTINGS_FILE, "utf8")); if (j.usdInr > 0) config.cryptoUsdInr = j.usdInr; if (j.leverage > 0) config.cryptoLeverage = j.leverage; } catch { /* defaults */ }
+export function saveDeltaSettings(s: { usdInr: number; leverage: number }) {
+  config.cryptoUsdInr = s.usdInr; config.cryptoLeverage = s.leverage;
+  if (process.env.NODE_ENV !== "test" && !process.env.VITEST) { _mk(_dir(DELTA_SETTINGS_FILE), { recursive: true }); _wf(DELTA_SETTINGS_FILE, JSON.stringify({ ...s, at: new Date().toISOString() }), { mode: 0o600 }); }
+}

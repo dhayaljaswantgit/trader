@@ -1,10 +1,14 @@
 import { useState } from "react";
-import { usePoll, fmt, Chip, istTime, Select } from "../lib.tsx";
+import { usePoll, fmt, Chip, istTime, Select, getVenue } from "../lib.tsx";
 
 type Leg = { ltp: number | null; bid: number | null; ask: number | null; volume: number | null; oi: number | null; iv: number | null; delta: number | null; theta: number | null } | null;
 type Chain = { spot: number; expiry: string; source: string; fetchedAt: string; strikes: Array<{ strike: number; ce: Leg; pe: Leg }> };
 
 export function OptionChainPage() {
+  if (getVenue() === "DELTA") return <section className="card"><h2>Option chain</h2><div className="empty">₿ Delta Exchange par abhi sirf perpetual futures support hain — option chain Dhan (NSE) ke liye hai. Upar-left se 🇮🇳 Dhan par switch karein.</div></section>;
+  return <OptionChainInner />;
+}
+function OptionChainInner() {
   const { data: prefs } = usePoll<any>("/api/preferences", 0);
   const opts = (prefs?.selected ?? []).filter((s: any) => s.instrumentType === "INDEX" || s.fnoEligible);
   const [key, setKey] = useState<string>(""); const [exp, setExp] = useState("");

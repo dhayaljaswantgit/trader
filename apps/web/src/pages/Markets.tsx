@@ -81,7 +81,7 @@ export function Markets() {
   const activeKey = shown[activeIdx]?.key ?? items[activeIdx]?.key ?? items[0]?.key ?? null;
   const activeItem = items.find(i => i.key === activeKey);
   const chainPanel = <div style={{ minWidth: 0, display: "flex", flexDirection: "column", maxHeight: isFull ? "100%" : layout === 1 ? 640 : 760 }}>
-    <MiniChain symKey={activeKey} symbol={activeItem?.symbol ?? "—"} eligible={!!activeItem && (activeItem.kind === "INDEX" || activeItem.fno)} /></div>;
+    {activeItem?.kind !== "CRYPTO_PERP" && <MiniChain symKey={activeKey} symbol={activeItem?.symbol ?? "—"} eligible={!!activeItem && (activeItem.kind === "INDEX" || activeItem.fno)} />}</div>;
   const grid = <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 12, ...(isFull ? { flex: 1, minHeight: 0, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` } : {}) }}>
     {shown.map((p, i) => <ChartPane key={i} pane={p} items={items} onChange={np => setPane(i, np)} active={i === activeIdx && layout > 1} onActivate={() => setActiveIdx(i)}
       height={paneH} fullscreen={full !== null} onFullscreen={() => setFull(full === null ? (layout === 1 ? 0 : -1) : null)} showStats={layout === 1 && full === null} />)}
@@ -113,7 +113,7 @@ export function Markets() {
       <div className="table-wrap"><table>
         <thead><tr><th>Symbol</th><th className="r">LTP</th><th className="r">Chg</th><th className="r">Bid / Ask</th><th className="r">Volume</th><th>Trend</th><th className="r">VWAP</th><th className="r">RSI</th><th className="r">ATR</th><th>Signal</th><th>Updated</th></tr></thead>
         <tbody>{filtered.map(i => { const pi = inPane(i.key); return <tr key={i.key} className={`click ${pi >= 0 ? "sel" : ""}`} onClick={() => setPane(activeIdx, { ...(panes[activeIdx] ?? { iv: "5" }), key: i.key })}>
-          <td className="sym"><b>{i.symbol}{pi >= 0 && layout > 1 && <span className="dim"> · chart {pi + 1}</span>}</b><small>{i.kind === "INDEX" ? "Index" : i.fno ? "F&O" : "Cash"}</small></td>
+          <td className="sym"><b>{i.symbol}{pi >= 0 && layout > 1 && <span className="dim"> · chart {pi + 1}</span>}</b><small>{i.kind === "CRYPTO_PERP" ? "Perpetual · USD" : i.kind === "INDEX" ? "Index" : i.fno ? "F&O" : "Cash"}</small></td>
           <td className="r num"><b>{fmt(i.quote?.ltp)}</b></td>
           <td className={`r num ${(i.changePct ?? 0) >= 0 ? "up" : "down"}`}>{pct(i.changePct, 2)}</td>
           <td className="r num muted">{i.quote?.bid ? `${fmt(i.quote.bid)} / ${fmt(i.quote.ask)}` : "n/a"}</td>

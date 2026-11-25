@@ -1,3 +1,4 @@
+import type { DeltaAdapter } from "@dat/broker-dhan";
 import type { PrismaClient, Instrument } from "@prisma/client";
 import { MASTER_URL, parseMaster, type InstrumentRef, type Segment, type InstrumentType } from "@dat/broker-dhan";
 
@@ -66,4 +67,22 @@ export async function nifty50Symbols(fetchFn: typeof fetch = fetch): Promise<str
   if (si < 0) throw new Error("NIFTY 50 list format changed (no Symbol column)");
   const symbols = lines.slice(1).map(l => l.split(",")[si]!.trim()).filter(Boolean);
   n50Cache = { at: Date.now(), symbols }; return symbols;
+}
+
+/** Delta Exchange perpetual futures → instrument list (key DELTA:<symbol>). Prices are USD; contractValue = units per contract. */
+export const deltaSyncState = { running: false, lastSync: null as string | null, count: 0, error: null as string | null };
+export async function syncDeltaInstruments(prisma: PrismaClient, delta: DeltaAdapter) {
+  if (deltaSyncState.running) return deltaSyncState;
+  deltaSyncState.running = true; deltaSyncState.error = null;
+  try {
+    const ps = await delta.products();
+    for (const p of ps) {
+      const data = { securityId: p.symbol, segment: "DELTA", instrumentType: "CRYPTO_PERP", symbol: p.symbol, name: `${p.description} (Delta)`, lotSize: 1,
+        tickSize: p.tickSize, contractValue: p.contractValue, takerFee: p.takerFee, fnoEligible: false, source: "DELTA" };
+      await prisma.instrument.upsert({ where: { key: `DELTA:${p.symbol}` }, update: data, create: { key: `DELTA:${p.symbol}`, ...data } });
+    }
+    deltaSyncState.count = ps.length; deltaSyncState.lastSync = new Date().toISOString();
+  } catch (e) { deltaSyncState.error = (e as Error).message; }
+  finally { deltaSyncState.running = false; }
+  return deltaSyncState;
 }

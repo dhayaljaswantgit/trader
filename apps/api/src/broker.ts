@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { DhanAdapter, MockBrokerAdapter, type IBrokerAdapter } from "@dat/broker-dhan";
+import { DeltaAdapter, DhanAdapter, MockBrokerAdapter, type IBrokerAdapter, type InstrumentRef, type LiveQuote } from "@dat/broker-dhan";
 
 /** Credentials live in data/dhan.json (chmod 600, gitignored) or .env. Never sent to the browser. */
 const FILE = resolve(process.env.DATA_DIR ?? resolve(import.meta.dirname, "../../../data"), "dhan.json");
@@ -12,9 +12,12 @@ try { if (existsSync(FILE)) creds = { ...creds, ...JSON.parse(readFileSync(FILE,
 
 export function saveCreds(c: { clientId: string; accessToken: string }) {
   creds = { ...c, savedAt: new Date().toISOString() };
+  if (process.env.VITEST) return; // tests never touch the user's real credential file
   mkdirSync(dirname(FILE), { recursive: true });
   writeFileSync(FILE, JSON.stringify(creds), { mode: 0o600 }); chmodSync(FILE, 0o600);
 }
+/** Current Dhan credentials (server-side only — never send to the browser). */
+export const currentCreds = () => ({ clientId: creds.clientId, accessToken: creds.accessToken });
 /** Decode JWT expiry without verifying (display only). */
 export function tokenInfo() {
   let expiresAt: string | null = null;
@@ -29,17 +32,36 @@ function savedSource(): "MOCK" | "DHAN" | null {
 }
 
 export class BrokerHolder {
-  current: IBrokerAdapter;
+  /** Dhan or Mock (NSE/BSE). Delta Exchange instruments (segment DELTA) are always routed to Delta, in parallel. */
+  private base: IBrokerAdapter;
   readonly mock: MockBrokerAdapter;
   readonly dhan: DhanAdapter;
+  readonly delta: DeltaAdapter;
+  private router: IBrokerAdapter;
   constructor(clock: () => Date, initial: "MOCK" | "DHAN" = savedSource() ?? (process.env.BROKER as "MOCK" | "DHAN") ?? "MOCK", fetchFn?: typeof fetch, private persist = false) {
     this.mock = new MockBrokerAdapter(clock);
     this.dhan = new DhanAdapter(() => creds, fetchFn);
-    this.current = initial === "DHAN" ? this.dhan : this.mock;
+    this.delta = new DeltaAdapter(fetch, undefined, clock);
+    this.base = initial === "DHAN" ? this.dhan : this.mock;
+    const isDelta = (r: InstrumentRef) => r.segment === "DELTA";
+    const self = this;
+    this.router = {
+      get source() { return self.base.source; },
+      healthCheck: () => self.base.healthCheck(),
+      getCandles: q => isDelta(q.ref) ? self.delta.getCandles(q) : self.base.getCandles(q),
+      getQuotes: async refs => {
+        const d = refs.filter(isDelta), o = refs.filter(r => !isDelta(r));
+        const [a, b] = await Promise.all([o.length ? self.base.getQuotes(o) : Promise.resolve([] as LiveQuote[]), d.length ? self.delta.getQuotes(d) : Promise.resolve([] as LiveQuote[])]);
+        return [...a, ...b];
+      },
+      getExpiries: u => self.base.getExpiries(u),
+      getOptionChain: (u, e) => self.base.getOptionChain(u, e),
+    };
   }
+  get current(): IBrokerAdapter { return this.router; }
   use(s: "MOCK" | "DHAN") {
-    this.current = s === "DHAN" ? this.dhan : this.mock;
+    this.base = s === "DHAN" ? this.dhan : this.mock;
     if (this.persist) { mkdirSync(dirname(SOURCE_FILE), { recursive: true }); writeFileSync(SOURCE_FILE, JSON.stringify({ source: s, at: new Date().toISOString() }), { mode: 0o600 }); }
   }
-  get source() { return this.current.source; }
+  get source() { return this.base.source; }
 }

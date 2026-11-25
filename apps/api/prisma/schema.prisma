@@ -24,7 +24,9 @@ enum SessionStatus {
 /// One row per trading day: limits chosen each morning.
 model TradingSession {
   id                String        @id @default(uuid())
-  tradingDate       String        @unique // YYYY-MM-DD IST
+  tradingDate       String        // YYYY-MM-DD IST
+  /// Exchange this session belongs to: DHAN (NSE/BSE) | DELTA (crypto). Each exchange has its own daily session.
+  venue             String        @default("DHAN")
   mode              TradingMode   @default(PAPER)
   capitalInr        Decimal       @db.Decimal(14, 2)
   maxLossInr        Decimal       @db.Decimal(14, 2)
@@ -39,6 +41,7 @@ model TradingSession {
   updatedAt         DateTime      @updatedAt
   riskDecisions     RiskDecision[]
   paperTrades       PaperTrade[]
+  @@unique([tradingDate, venue])
 }
 
 /// Single-row trading preferences.
@@ -53,6 +56,12 @@ model Preferences {
   autoPaper        Boolean  @default(false)
   /// Auto-create each day's session at market open using the defaults below
   autoStartDaily   Boolean  @default(false)
+  /// Start the auto engine by itself when the market opens (per venue)
+  autoEngine       Boolean  @default(false)
+  /// When the risk-% budget can't cover 1 lot, still trade 1 lot if its stop risk fits the day's remaining max loss
+  minOneLot        Boolean  @default(true)
+  /// how many positions may be open at once on this exchange (engine + risk check)
+  maxOpenPositions Int      @default(1)
   defaultCapital   Decimal  @default(100000) @db.Decimal(14, 2)
   defaultMaxLoss   Decimal  @default(1000) @db.Decimal(14, 2)
   defaultMaxProfit Decimal? @db.Decimal(14, 2)
@@ -75,6 +84,9 @@ model Instrument {
   underlyingSymbol     String?
   fnoEligible          Boolean  @default(false)
   fnoLotSize           Int?
+  /// Crypto perpetuals (Delta): underlying units per contract, e.g. 0.001 BTC; taker fee rate
+  contractValue        Decimal? @db.Decimal(18, 8)
+  takerFee             Decimal? @db.Decimal(8, 6)
   source               String
   updatedAt            DateTime @updatedAt
 
@@ -103,6 +115,7 @@ model Signal {
   createdAt       DateTime @default(now())
 
   @@index([createdAt])
+  venue           String   @default("DHAN")
 }
 
 model RiskDecision {
@@ -160,6 +173,7 @@ model PaperTrade {
   fillNote        String
   /// Strategy Builder trades: { custom, specId, uKey, dir, uEntry, uStop, uTarget, entryT, tf, curStop }
   meta            Json?
+  venue           String         @default("DHAN")
   openedAt        DateTime       @default(now())
   closedAt        DateTime?
 

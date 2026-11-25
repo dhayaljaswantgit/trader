@@ -12,12 +12,13 @@
     "db:deploy": "dotenv -e ../../.env -- prisma migrate deploy"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
     "@dat/broker-dhan": "workspace:*",
+    "@dat/quant": "workspace:*",
     "@dat/risk-engine": "workspace:*",
     "@dat/shared": "workspace:*",
     "@prisma/client": "^6.16.0",
-    "fastify": "^5.2.1",
-    "@dat/quant": "workspace:*"
+    "fastify": "^5.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

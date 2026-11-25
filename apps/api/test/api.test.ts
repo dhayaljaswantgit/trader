@@ -154,6 +154,47 @@ describe("paper trading flow (mock data)", () => {
     await inject("POST", "/api/builder/apply-live", { strategyId: sid, capital: 500000, sizingMode: "fixed", lots: 100, capitalPerLot: 15000 });
     expect(((await prisma.customStrategy.findUniqueOrThrow({ where: { id } })).spec as { sizing: { lots: number } }).sizing.lots).toBe(100);
   });
+  it("fixed lots no longer get blocked by the 1% rule: lots shrink to fit the day's max loss", async () => {
+    await start({ capitalInr: 100000, maxLossInr: 6000, maxProfitInr: null, riskPerTradePct: 1 });
+    const always = { t: "compare", a: { k: "value", v: 1 }, op: ">", b: { k: "value", v: 0 } };
+    const spec = { name: "Fixed lots test", timeframe: "5", instruments: ["IDX_I:13"], entryMode: "barClose", long: { enabled: true, entry: [always], exit: [] }, short: { enabled: false, entry: [], exit: [] },
+      stop: { type: "points", value: 60 }, target: { type: "none", value: 0 }, trailing: { type: "none", every: 5, by: 1 },
+      session: { squareOff: "15:15", noEntryAfter: "14:45", maxTradesPerDay: 1 }, sizing: { qty: 75, delta: 0.5, mode: "fixed", lots: 50, capitalPerLot: 1000 }, costs: { perTrade: 60, slippagePoints: 0.5 } };
+    const sid = `custom:${(await inject("POST", "/api/builder/strategies", { spec })).json().id}`;
+    await inject("PUT", "/api/preferences", { strategies: [sid], instrumentKeys: ["IDX_I:13"], styles: ["INTRADAY"], autoPaper: true, segments: ["OPTIONS"] });
+    ctx.engine.status.running = true; await ctx.engine.tick(); ctx.engine.stop();
+    const t = await prisma.paperTrade.findFirstOrThrow();                       // a trade happened (was: RISK_TOO_HIGH every time)
+    const risk = (Number(t.entryPrice) - Number(t.stopPrice)) * t.quantity;
+    expect(risk).toBeLessThanOrEqual(6000);                                     // a stop hit fits the day's max loss
+    expect(t.quantity).toBeLessThan(50 * t.lotSize);                            // lots were reduced, not rejected
+    expect(await prisma.riskDecision.count({ where: { approved: true } })).toBe(1);
+  });
+  it("minimum 1 lot: when 1% can't cover one lot but the day's max loss can, trade 1 lot (toggle off → strict, clear reason)", async () => {
+    await start({ capitalInr: 10000, maxLossInr: 9000, maxProfitInr: null, riskPerTradePct: 0.05 });   // 1% budget = ₹5 → never covers a lot
+    const always = { t: "compare", a: { k: "value", v: 1 }, op: ">", b: { k: "value", v: 0 } };
+    const spec = { name: "Min lot test", timeframe: "5", instruments: ["IDX_I:13"], entryMode: "barClose", long: { enabled: true, entry: [always], exit: [] }, short: { enabled: false, entry: [], exit: [] },
+      stop: { type: "points", value: 20 }, target: { type: "none", value: 0 }, trailing: { type: "none", every: 5, by: 1 },
+      session: { squareOff: "15:15", noEntryAfter: "14:45", maxTradesPerDay: 1 }, sizing: { qty: 75, delta: 0.5 }, costs: { perTrade: 60, slippagePoints: 0.5 } };
+    const sid = `custom:${(await inject("POST", "/api/builder/strategies", { spec })).json().id}`;
+    await inject("PUT", "/api/preferences", { strategies: [sid], instrumentKeys: ["IDX_I:13"], styles: ["INTRADAY"], autoPaper: true, segments: ["OPTIONS"], minOneLot: false });
+    ctx.engine.status.running = true; await ctx.engine.tick();
+    expect(await prisma.paperTrade.count()).toBe(0);
+    const rej = await prisma.auditEvent.findFirstOrThrow({ where: { action: "ENTRY_REJECTED" }, orderBy: { id: "desc" } });
+    expect(JSON.stringify(rej.details)).toMatch(/risk budget ₹\d+ < 1 lot risk/);              // correct reason (not "capital < per lot")
+    await inject("PUT", "/api/preferences", { minOneLot: true });
+    now = new Date(now.getTime() + 11 * 60000); await ctx.engine.tick(); ctx.engine.stop();
+    const t = await prisma.paperTrade.findFirstOrThrow();
+    expect(t.quantity).toBe(t.lotSize);                                                         // exactly 1 lot
+    expect((Number(t.entryPrice) - Number(t.stopPrice)) * t.quantity).toBeLessThanOrEqual(9000); // within the day's max loss
+  });
+  it("auto-start engine: only when enabled, market open and the day session is active", async () => {
+    await start({ capitalInr: 100000, maxLossInr: 2000, maxProfitInr: null });
+    ctx.engine.stop(); await ctx.engine.autoStart(); expect(ctx.engine.status.running).toBe(false);   // off by default
+    await inject("PUT", "/api/preferences", { autoEngine: true });
+    now = new Date("2026-11-09T11:00:00Z"); await ctx.engine.autoStart(); expect(ctx.engine.status.running).toBe(false); // 16:30 IST: market closed
+    now = new Date("2026-11-09T05:00:00Z"); await ctx.engine.autoStart(); expect(ctx.engine.status.running).toBe(true);  // 10:30 IST
+    ctx.engine.stop(); await inject("PUT", "/api/preferences", { autoEngine: false });
+  });
   it("ENTER signal → option contract pick → risk check → paper fill (mock chain)", async () => {
     await start({ capitalInr: 100000, maxLossInr: 2000, maxProfitInr: null, riskPerTradePct: 1 });
     const session = await prisma.tradingSession.findFirstOrThrow();

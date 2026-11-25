@@ -80,7 +80,9 @@ export class DhanAdapter implements IBrokerAdapter {
     if (!refs.length) return [];
     const body: Record<string, number[]> = {};
     for (const r of refs.slice(0, 1000)) (body[r.segment] ??= []).push(Number(r.securityId));
-    const j = await this.quoteT.run(() => this.post<{ data: Record<string, Record<string, any>> }>("/marketfeed/quote", body));
+    const call = () => this.quoteT.run(() => this.post<{ data: Record<string, Record<string, any>> }>("/marketfeed/quote", body));
+    // a single slow Dhan response is common — retry once on timeout before reporting an error
+    const j = await call().catch(e => (e as BrokerError).code === "TIMEOUT" ? call() : Promise.reject(e));
     const received = new Date().toISOString(), out: LiveQuote[] = [];
     for (const r of refs) {
       const q = j.data?.[r.segment]?.[r.securityId]; if (!q || typeof q.last_price !== "number") continue;

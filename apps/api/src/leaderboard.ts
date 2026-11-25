@@ -2,8 +2,8 @@
  * Strategy leaderboard: backtest every strategy on the same basket of instruments and rank them.
  * Runs as a background job (CPU work yields between runs so the API and engine stay responsive).
  */
-import type { PrismaClient } from "@prisma/client";
-import { STRATEGIES, quickBacktest, runSpecBacktest, type Bar, type BtTrade, type StrategySpec } from "@dat/quant";
+import { Prisma, type PrismaClient } from "@prisma/client";
+import { STRATEGIES, quickBacktest, runSpecBacktest, cryptoSpec, type Bar, type BtTrade, type StrategySpec } from "@dat/quant";
 import type { BrokerHolder } from "./broker.ts";
 import { refOf } from "./instruments.ts";
 import { config } from "./config.ts";
@@ -60,7 +60,9 @@ export class Leaderboard {
   status: LeaderboardStatus = { running: false, phase: "idle", done: 0, total: 0, error: null, startedAt: null };
   constructor(private prisma: PrismaClient, private broker: BrokerHolder, private clock: () => Date) {}
 
-  start(years = 1, interval: 5 | 15 | "D" = 5, keys?: string[], slippageBps = 5): LeaderboardStatus {
+  private runVenue: "DHAN" | "DELTA" = "DHAN";
+  start(years = 1, interval: 5 | 15 | "D" = 5, keys?: string[], slippageBps = 5, venue: "DHAN" | "DELTA" = "DHAN"): LeaderboardStatus {
+    if (!this.status.running) this.runVenue = venue;
     if (this.status.running) return this.status;
     this.status = { running: true, phase: "Fetching candles", done: 0, total: 0, error: null, startedAt: this.clock().toISOString() };
     void this.run(interval === "D" ? 10 : Math.min(Math.max(years, 0.25), 2), interval, keys?.length ? keys.slice(0, 20) : LEADERBOARD_UNIVERSE, Math.min(Math.max(slippageBps, 0), 50)).catch(e => { this.status = { ...this.status, running: false, phase: "failed", error: (e as Error).message }; });
@@ -71,12 +73,16 @@ export class Leaderboard {
     const daily = interval === "D";
     const insts = await this.prisma.instrument.findMany({ where: { key: { in: keys } } });
     const to = this.clock(), from = new Date(to.getTime() - years * 365.25 * 86400000);
-    const data: Array<{ symbol: string; bars: Bar[]; index: boolean }> = [];
+    const data: Array<{ symbol: string; bars: Bar[]; index: boolean; crypto?: { contractValue: number; takerFee: number } }> = [];
     this.status.total = insts.length;
     for (const inst of insts) {
       this.status.phase = `Fetching ${daily ? "daily" : interval + "-min"} candles · ${inst.symbol}`;
       const bars = await this.broker.current.getCandles({ ref: refOf(inst), interval, from, to });
-      if (bars.length >= 200) data.push({ symbol: inst.symbol, bars, index: inst.instrumentType === "INDEX" });
+      if (bars.length < 200) { this.status.done++; continue; }
+      if (inst.segment === "DELTA") { // USD → ₹ so capital/P&L stay comparable
+        const R = config.cryptoUsdInr;
+        data.push({ symbol: inst.symbol, index: false, crypto: { contractValue: Number(inst.contractValue ?? 1), takerFee: Number(inst.takerFee ?? 0.0005) }, bars: bars.map(x => ({ ...x, o: x.o * R, h: x.h * R, l: x.l * R, c: x.c * R })) });
+      } else data.push({ symbol: inst.symbol, bars, index: inst.instrumentType === "INDEX" });
       this.status.done++;
     }
     if (!data.length) throw new Error("No candle data returned — check the Dhan connection.");
@@ -91,7 +97,11 @@ export class Leaderboard {
       const cs = customs.get(id), s = cs ? { name: cs.name, family: "My custom" } : STRATEGIES[id]!; const all: BtTrade[] = []; let profitable = 0, tested = 0, mdd = 0;
       const perInst: InstrumentStat[] = []; const perRow: Record<string, InstrumentRow> = {}; const tagged: Array<{ k: number; t: BtTrade }> = [];
       for (const [k, d] of data.entries()) {
-        const r = cs ? runSpecBacktest(d.bars, cs.spec as unknown as StrategySpec, { daily, startingCapital: CAPITAL, oosFraction: 0.3 }) : quickBacktest(d.bars, { strategyId: id, daily, startingCapital: CAPITAL, riskPerTradePct: 0.5, slippageBps: slip, // Indices trade via futures/options → futures charges; stocks: cash delivery (daily) or intraday.
+        const r = cs ? runSpecBacktest(d.bars, d.crypto ? cryptoSpec(cs.spec as unknown as StrategySpec, { ...d.crypto, refPrice: d.bars[d.bars.length - 1]!.c, leverage: config.cryptoLeverage, slippagePrice: 0.5 * config.cryptoUsdInr }) : cs.spec as unknown as StrategySpec,
+            { daily, startingCapital: CAPITAL, oosFraction: 0.3, market: d.crypto ? "CRYPTO" : "NSE" })
+          : d.crypto ? quickBacktest(d.bars, { strategyId: id, daily, startingCapital: CAPITAL, riskPerTradePct: 0.5, slippageBps: slip, product: "CRYPTO_PERP", allowShort: true, squareOffIst: config.squareOffIst,
+            maxHoldBars: daily ? 30 : 288, lotSize: d.crypto.contractValue, oosFraction: 0.3, market: "CRYPTO" })
+          : quickBacktest(d.bars, { strategyId: id, daily, startingCapital: CAPITAL, riskPerTradePct: 0.5, slippageBps: slip, // Indices trade via futures/options → futures charges; stocks: cash delivery (daily) or intraday.
           product: d.index ? "FUTURES" : daily ? "EQUITY_DELIVERY" : "EQUITY_INTRADAY",
           // Daily = cash delivery: long-only (no overnight shorting in cash), 15-day max hold.
           allowShort: !daily, squareOffIst: config.squareOffIst, maxHoldBars: daily ? 15 : 60, lotSize: 1, oosFraction: 0.3 });
@@ -123,7 +133,7 @@ export class Leaderboard {
     rows.sort((a, b) => Number(b.robust) - Number(a.robust) || b.returnPct - a.returnPct);
     const first = Math.min(...data.map(d => d.bars[0]!.t)), last = Math.max(...data.map(d => d.bars[d.bars.length - 1]!.t));
     const created = await this.prisma.leaderboardRun.create({ data: { dataSource: this.broker.source, rows: rows as object,
-      config: { interval: daily ? "Daily" : `${interval}m`, years, from: first, to: last, instruments: data.map(d => d.symbol), capitalPerInstrument: CAPITAL, riskPerTradePct: 0.5, slippageBps: slip,
+      config: { venue: this.runVenue, interval: daily ? "Daily" : `${interval}m`, years, from: first, to: last, instruments: data.map(d => d.symbol), capitalPerInstrument: CAPITAL, riskPerTradePct: 0.5, slippageBps: slip,
         product: data.every(d => d.index) ? "FUTURES" : data.some(d => d.index) ? `FUTURES (indices) + ${daily ? "EQUITY_DELIVERY" : "EQUITY_INTRADAY"} (stocks)` : daily ? "EQUITY_DELIVERY" : "EQUITY_INTRADAY", oosFraction: 0.3, squareOffIst: config.squareOffIst } } });
     this.status.phase = "Saving trade details";
     for (let k = 0; k < details.length; k += 10) await this.prisma.leaderboardDetail.createMany({ data: details.slice(k, k + 10).map(d => ({ runId: created.id, ...d })) });
@@ -137,5 +147,9 @@ export class Leaderboard {
     return { run: { id: run.id, createdAt: run.createdAt, dataSource: run.dataSource, config: run.config }, row, detail: d?.data ?? null };
   }
 
-  latest() { return this.prisma.leaderboardRun.findFirst({ orderBy: { createdAt: "desc" } }); }
+  /** Latest run for an exchange (older runs without a venue tag count as Dhan). */
+  latest(venue: "DHAN" | "DELTA" = "DHAN") {
+    return this.prisma.leaderboardRun.findFirst({ where: venue === "DELTA" ? { config: { path: ["venue"], equals: "DELTA" } }
+      : { OR: [{ config: { path: ["venue"], equals: "DHAN" } }, { config: { path: ["venue"], equals: Prisma.AnyNull } }] }, orderBy: { createdAt: "desc" } });
+  }
 }

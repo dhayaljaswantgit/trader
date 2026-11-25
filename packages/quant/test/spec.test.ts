@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runSpecBacktest, JASSU_MARKET_TREND, type StrategySpec, type Bar } from "../src/index.ts";
+import { runSpecBacktest, JASSU_MARKET_TREND, type StrategySpec, type Bar, type Condition } from "../src/index.ts";
 
 // Build 5-min IST sessions: day(dateIdx, [[o,h,l,c], ...]) starting 09:15
 const T = (d: number, k: number) => Date.UTC(2026, 0, 5 + d, 3, 45) / 1000 + k * 300;
@@ -152,5 +152,39 @@ describe("live trading = backtest (parity)", () => {
     expect(live.length).toBeGreaterThan(5);
     const n = Math.min(live.length, bt.length);
     expect(live.slice(0, n).map(t => [t.side, t.entryTime, t.exitTime])).toEqual(bt.slice(0, n).map(t => [t.side, t.entryTime, t.exitTime]));
+  });
+});
+
+import { cryptoSpec, runBacktest, dayContext, orderCharges } from "../src/index.ts";
+describe("crypto (24x7) mode", () => {
+  // 24h of 5-min candles per IST day, starting 00:00 IST, steady uptrend
+  const D0 = Date.UTC(2026, 0, 4, 18, 30) / 1000; // 00:00 IST
+  const bars: Bar[] = Array.from({ length: 288 * 3 }, (_, k) => ({ t: D0 + k * 300, o: 60000 + k * 5, h: 60008 + k * 5, l: 59998 + k * 5, c: 60005 + k * 5, v: 10 }));
+  const always: Condition = { t: "compare", a: { k: "value", v: 1 }, op: ">", b: { k: "value", v: 0 } };
+  const base: StrategySpec = { ...noCost, entryMode: "barClose", long: { enabled: true, entry: [always], exit: [] }, short: { enabled: false, entry: [], exit: [] },
+    stop: { type: "points", value: 500 }, trailing: { type: "none", every: 5, by: 1 }, session: { squareOff: "15:15", noEntryAfter: "14:45", maxTradesPerDay: 1 } };
+  it("no 15:15 square-off and no forced close at day change", () => {
+    const t = runSpecBacktest(bars, base, { daily: false, startingCapital: 1e6, oosFraction: 0.3, market: "CRYPTO" }).trades[0]!;
+    expect(t.exitReason).toBe("END_OF_DATA");            // held across midnights
+    const nse = runSpecBacktest(bars, base, { daily: false, startingCapital: 1e6, oosFraction: 0.3 }).trades[0]!;
+    expect(["SQUARE_OFF", "SESSION_END"]).toContain(nse.exitReason);
+  });
+  it("cryptoSpec: 1 lot = 1 contract, delta 1, margin by leverage, fees as % of notional", () => {
+    const sp = cryptoSpec({ ...base, sizing: { qty: 75, delta: 0.5, mode: "fixed", lots: 10 } }, { contractValue: 0.001, refPrice: 60000, leverage: 10, takerFee: 0.0005 });
+    expect(sp.sizing).toMatchObject({ qty: 0.001, delta: 1, capitalPerLot: 6 });
+    const t = runSpecBacktest(bars, sp, { daily: false, startingCapital: 1e6, oosFraction: 0.3, market: "CRYPTO" }).trades[0]!;
+    const notional = (t.entry + t.exit) * 0.001 * 10;
+    expect(t.charges).toBeCloseTo(notional * 0.05 * 1.18 / 100, 2);
+    expect(t.grossPnl).toBeCloseTo((t.exit - t.entry) * 0.001 * 10, 2);
+  });
+  it("opening range starts at the day's first candle (00:00 for crypto, 09:15 for NSE)", () => {
+    const ctx = dayContext(bars, 300, [15]);
+    expect(ctx.or[15]!.hi[1]).toBeNull(); expect(ctx.or[15]!.hi[2]).toBe(Math.max(bars[0]!.h, bars[1]!.h, bars[2]!.h)); // 00:00–00:15
+  });
+  it("built-in backtester: CRYPTO_PERP fee model and 24x7 holding", () => {
+    expect(orderCharges("CRYPTO_PERP", "BUY", 100000)).toBeCloseTo(100000 * 0.0005 * 1.18, 2);
+    const r = runBacktest(bars, { strategyId: "supertrend-10-3", daily: false, startingCapital: 1e6, riskPerTradePct: 1, slippageBps: 2, product: "CRYPTO_PERP", allowShort: true,
+      squareOffIst: "15:15", maxHoldBars: 1000, lotSize: 0.001, oosFraction: 0.3, market: "CRYPTO" });
+    expect(r.trades.every(t => t.exitReason !== "SQUARE_OFF" && t.exitReason !== "SESSION_END")).toBe(true);
   });
 });

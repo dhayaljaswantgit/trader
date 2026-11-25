@@ -1,0 +1,23 @@
+# Coolify: New Resource → Docker Compose (from your private Git repo). Set the env vars in Coolify's UI.
+# In Coolify give the service an HTTPS domain (port 4000). Every page is behind APP_USER/APP_PASSWORD login (see docs/DEPLOY.md).
+# Uses your EXISTING Postgres: set DATABASE_URL (migrations create/upgrade the tables on every start).
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to your existing Postgres, e.g. postgresql://user:pass@host:5432/dhan_trader}
+      APP_USER: ${APP_USER:-jassu}
+      APP_PASSWORD: ${APP_PASSWORD:?set APP_PASSWORD (browser login)}
+      BROKER: ${BROKER:-DHAN}
+      DHAN_REDIRECT_URL: ${DHAN_REDIRECT_URL:-}
+      CRYPTO_USDINR: ${CRYPTO_USDINR:-93}
+      CRYPTO_LEVERAGE: ${CRYPTO_LEVERAGE:-10}
+      SQUARE_OFF_IST: ${SQUARE_OFF_IST:-15:15}
+      LOG_LEVEL: info
+    expose:
+      - "4000"   # Coolify's proxy routes your domain (HTTPS) here; no host port is opened
+    volumes:
+      - trader-data:/app/data   # Dhan/TOTP creds, settings, Claude login (keep private, back up)
+volumes:
+  trader-data:

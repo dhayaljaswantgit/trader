@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, usePoll, inr, fmt, istDateTime, Select, ConfirmModal } from "../lib.tsx";
+import { api, usePoll, inr, fmt, istDateTime, Select, ConfirmModal, useCrypto } from "../lib.tsx";
 import { ResultPage, type R } from "./Backtest.tsx";
 
 // ---- spec types (mirror of packages/quant/src/spec.ts) ----
 type Field = "open" | "high" | "low" | "close";
 type Operand = { k: "price" | "prevCandle" | "prevDay"; f: Field } | { k: "today"; f: "open" | "high" | "low" } | { k: "orHigh" | "orLow"; m: number }
-  | { k: "ema" | "sma" | "rsi" | "atr" | "adx"; n: number } | { k: "vwap" } | { k: "supertrend"; n: number; m: number } | { k: "value"; v: number };
+  | { k: "ema" | "sma" | "rsi" | "atr" | "adx"; n: number } | { k: "vwap" } | { k: "supertrend"; n: number; m: number } | { k: "highest" | "lowest"; n: number } | { k: "value"; v: number };
 type Op = ">" | "<" | ">=" | "<=" | "crossAbove" | "crossBelow";
 type Cond = { t: "compare"; a: Operand; op: Op; b: Operand; offset?: number } | { t: "consecutive"; n: number; a: Operand; op: ">" | "<" | ">=" | "<="; b: Operand; offset?: number }
   | { t: "candle"; color: "green" | "red"; n: number } | { t: "prevDayColor"; color: "green" | "red" } | { t: "gap"; dir: "up" | "down"; minPoints?: number; minPct?: number } | { t: "time"; from: string; to: string };
 type Side = { enabled: boolean; entry: Cond[]; exit: Cond[] };
 export type Spec = {
-  name: string; description?: string; version?: number; timeframe?: "1" | "5" | "15"; instruments?: string[]; entryMode: "barClose" | "dayOpen"; long: Side; short: Side;
+  name: string; description?: string; version?: number; timeframe?: "1" | "5" | "15" | "D"; instruments?: string[]; entryMode: "barClose" | "dayOpen"; long: Side; short: Side;
   stop: { type: "none" | "points" | "pct" | "atr" | "pivot"; value: number }; target: { type: "none" | "points" | "pct" | "rr"; value: number };
   trailing: { type: "none" | "step" | "trail" | "pivot"; every: number; by: number; k?: number }; session: { squareOff: string; noEntryAfter: string; maxTradesPerDay: number; dayProfitLock?: number; dayLossLimit?: number; windows?: Array<{ from: string; to: string }>; exitAtWindowEnd?: boolean };
   sizing: { qty: number; delta: number; mode?: "fixed" | "capital" | "risk"; lots?: number; capitalPerLot?: number; riskPct?: number }; costs: { perTrade: number; slippagePoints: number; perExtraLot?: number };
@@ -28,13 +28,15 @@ const OPERANDS: Array<{ v: string; label: string; group: string; make: () => Ope
   { v: "ema", label: "EMA", group: "Indicators", make: () => ({ k: "ema", n: 20 }) }, { v: "sma", label: "SMA", group: "Indicators", make: () => ({ k: "sma", n: 20 }) },
   { v: "vwap", label: "VWAP (needs volume)", group: "Indicators", make: () => ({ k: "vwap" }) }, { v: "supertrend", label: "Supertrend line", group: "Indicators", make: () => ({ k: "supertrend", n: 10, m: 3 }) },
   { v: "rsi", label: "RSI", group: "Indicators", make: () => ({ k: "rsi", n: 14 }) }, { v: "adx", label: "ADX", group: "Indicators", make: () => ({ k: "adx", n: 14 }) },
-  { v: "atr", label: "ATR", group: "Indicators", make: () => ({ k: "atr", n: 14 }) }, { v: "value", label: "Fixed number", group: "Number", make: () => ({ k: "value", v: 0 }) },
+  { v: "atr", label: "ATR", group: "Indicators", make: () => ({ k: "atr", n: 14 }) },
+  { v: "highest", label: "Highest high (last N candles)", group: "Channels", make: () => ({ k: "highest", n: 20 }) }, { v: "lowest", label: "Lowest low (last N candles)", group: "Channels", make: () => ({ k: "lowest", n: 20 }) }, { v: "value", label: "Fixed number", group: "Number", make: () => ({ k: "value", v: 0 }) },
 ];
 const opKey = (o: Operand) => "f" in o ? `${o.k}.${o.f}` : o.k;
 const opText = (o: Operand): string => {
   switch (o.k) {
     case "price": return `candle ${o.f}`; case "prevCandle": return `previous candle ${o.f}`; case "prevDay": return `yesterday's ${o.f}`;
     case "today": return o.f === "open" ? "today's open" : `today's ${o.f}`; case "orHigh": return `${o.m}-min opening-range high`; case "orLow": return `${o.m}-min opening-range low`;
+    case "highest": return `${o.n}-candle highest high`; case "lowest": return `${o.n}-candle lowest low`;
     case "vwap": return "VWAP"; case "supertrend": return `Supertrend(${o.n},${o.m})`; case "value": return String(o.v); default: return `${o.k.toUpperCase()}(${o.n})`;
   }
 };
@@ -61,7 +63,7 @@ const COND_TYPES: Array<{ v: Cond["t"]; label: string; sub: string; make: () => 
 ];
 /** Mirror a CALL-side condition into the PUT side. */
 const flipOp = (op: string) => ({ ">": "<", "<": ">", ">=": "<=", "<=": ">=", crossAbove: "crossBelow", crossBelow: "crossAbove" } as Record<string, string>)[op] ?? op;
-const flipOperand = (o: Operand): Operand => o.k === "today" && o.f !== "open" ? { k: "today", f: o.f === "high" ? "low" : "high" } : o.k === "orHigh" ? { k: "orLow", m: o.m } : o.k === "orLow" ? { k: "orHigh", m: o.m }
+const flipOperand = (o: Operand): Operand => o.k === "highest" ? { k: "lowest", n: o.n } : o.k === "lowest" ? { k: "highest", n: o.n } : o.k === "today" && o.f !== "open" ? { k: "today", f: o.f === "high" ? "low" : "high" } : o.k === "orHigh" ? { k: "orLow", m: o.m } : o.k === "orLow" ? { k: "orHigh", m: o.m }
   : "f" in o && (o.f === "high" || o.f === "low") ? { ...o, f: o.f === "high" ? "low" : "high" } as Operand : o;
 function mirror(c: Cond): Cond {
   switch (c.t) {
@@ -125,7 +127,7 @@ const TFS = [{ v: "1", label: "1-min", years: 1 }, { v: "5", label: "5-min", yea
 
 export function Builder() {
   const { data: rows, reload } = usePoll<Row[]>("/api/builder/strategies", 0);
-  const { data: prefs } = usePoll<any>("/api/preferences", 0);
+  const { data: prefs } = usePoll<any>("/api/preferences", 0); const cryptoList = useCrypto();
   const [selId, setSelId] = useState<string | null>(null); const [spec, setSpec] = useState<Spec | null>(null); const [dirty, setDirty] = useState(false);
   const [msg, setMsg] = useState(""); const [err, setErr] = useState<string[]>([]); const [busy, setBusy] = useState(""); const [del, setDel] = useState<Row | null>(null);
   const [t, setT] = useState({ key: "IDX_I:13", interval: "5", years: "2", capital: "100000" });
@@ -135,8 +137,8 @@ export function Builder() {
   const instruments = useMemo(() => {
     const list = [...(prefs?.selected ?? [])] as Array<{ key: string; symbol: string; name: string; instrumentType: string }>;
     if (!list.some(i => i.key === "IDX_I:13")) list.unshift({ key: "IDX_I:13", symbol: "NIFTY", name: "Nifty 50", instrumentType: "INDEX" });
-    return list;
-  }, [prefs]);
+    return [...list, ...cryptoList];
+  }, [prefs, cryptoList]);
   const edit = (p: Partial<Spec>) => { setSpec(s => s ? { ...s, ...p } : s); setDirty(true); };
   const pick = (r: Row) => { if (dirty && !window.confirm("Unsaved changes chhod dein?")) return; setSelId(r.id); setSpec(structuredClone(r.spec)); setDirty(false); setErr([]); setMsg(""); setMulti(null); };
   const save = async (asNew = false): Promise<string | null> => {
@@ -193,8 +195,8 @@ export function Builder() {
         <div className="form-grid">
           <label className="field"><span>Name</span><input className="input" value={spec.name} onChange={e => edit({ name: e.target.value })} /></label>
           <label className="field" style={{ gridColumn: "span 2" }}><span>Description (optional)</span><input className="input" value={spec.description ?? ""} onChange={e => edit({ description: e.target.value })} /></label>
-          <div className="field"><span>Live timeframe (auto paper trading)</span><div className="tabs">{(["1", "5", "15"] as const).map(x =>
-            <button key={x} className={(spec.timeframe ?? "5") === x ? "on" : ""} onClick={() => edit({ timeframe: x })}>{x}-min</button>)}</div></div>
+          <div className="field"><span>Live timeframe (auto paper trading)</span><div className="tabs">{(["1", "5", "15", "D"] as const).map(x =>
+            <button key={x} className={(spec.timeframe ?? "5") === x ? "on" : ""} onClick={() => edit({ timeframe: x })}>{x === "D" ? "Daily" : `${x}-min`}</button>)}</div></div>
           <div className="field" style={{ gridColumn: "span 2" }}><span>Live mein kis par chale (khali = Trade Setup ki saari list)</span><div className="actions" style={{ gap: 6, flexWrap: "wrap" }}>
             {(spec.instruments ?? []).map(k => <span key={k} className="pill NEUTRAL" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{instruments.find(i => i.key === k)?.symbol ?? k}
               <button className="btn sm" style={{ padding: "0 6px" }} aria-label="Remove" onClick={() => edit({ instruments: spec.instruments!.filter(x => x !== k) })}>✕</button></span>)}
@@ -272,7 +274,7 @@ export function Builder() {
         <div className="card-head"><h2>🧪 Test</h2></div>
         <div className="form-grid">
           <div className="field"><span>Instrument</span><Select search value={t.key} onChange={key => setT({ ...t, key })} ariaLabel="Instrument"
-            options={instruments.map(i => ({ value: i.key, label: i.symbol, sub: i.name, group: i.instrumentType === "INDEX" ? "Indices" : "Stocks" })).sort((a, b) => Number(a.group !== "Indices") - Number(b.group !== "Indices"))} /></div>
+            options={instruments.map(i => ({ value: i.key, label: i.symbol, sub: i.name, group: i.instrumentType === "INDEX" ? "Indices" : i.instrumentType === "CRYPTO_PERP" ? "₿ Crypto · Delta Exchange" : "Stocks" })).sort((a, b) => Number(a.group !== "Indices") - Number(b.group !== "Indices"))} /></div>
           <div className="field"><span>Timeframe</span><Select value={t.interval} onChange={v => setT({ ...t, interval: v, years: v === "D" ? "10" : v === "1" ? "1" : "2" })} ariaLabel="Timeframe"
             options={[{ value: "1", label: "1-min" }, { value: "5", label: "5-min" }, { value: "15", label: "15-min" }, { value: "D", label: "Daily" }]} /></div>
           <label className="field"><span>Period: {t.years} year(s)</span><input type="range" min={t.interval === "D" ? 1 : 0.25} max={t.interval === "D" ? 10 : 5} step={t.interval === "D" ? 1 : 0.25} value={t.years} onChange={e => setT({ ...t, years: e.target.value })} /></label>

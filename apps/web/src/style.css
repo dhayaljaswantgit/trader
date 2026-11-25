@@ -177,3 +177,13 @@ td.sym small { display: block; }
 .daybars { display: flex; align-items: stretch; gap: 1px; height: 140px; margin-top: 14px; overflow-x: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat; }
 .daybars .db { flex: 1 0 3px; position: relative; } .daybars .db i { position: absolute; left: 0; right: 0; border-radius: 1px; min-height: 1px; }
 .modal:has(.plan-wide) { width: min(940px, 100%); }
+
+/* Exchange switch (top-left) */
+.venue-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin: 0 4px 12px; background: var(--bg); border: 1px solid var(--line2); border-radius: 12px; }
+.venue-switch button { position: relative; border: 0; background: none; color: var(--muted); padding: 8px 6px; border-radius: 9px; font-weight: 700; cursor: pointer; font-size: 13px; }
+.venue-switch button.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; box-shadow: 0 4px 14px #7c8cff55; }
+.venue-switch .vdot { position: absolute; top: 6px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 3px #2fd08a33; }
+.venue-bg { font-size: 11px; color: var(--up); margin: -6px 8px 10px; }
+.brand-sub { display: block; font-size: 11px; font-weight: 500; color: var(--muted); }
+.auth-banner { margin: 12px 24px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chip-btn { background: none; border: 0; padding: 0; cursor: pointer; }

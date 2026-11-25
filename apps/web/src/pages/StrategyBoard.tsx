@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { api, usePoll, fmt, inr, istDateTime, Select } from "../lib.tsx";
+import { api, usePoll, fmt, inr, istDateTime, Select, useCrypto, getVenue } from "../lib.tsx";
 import { StrategyDetail } from "./StrategyDetail.tsx";
 
 type Opt = { id: string; name: string; description: string; family: string; needsVolume: boolean; intradayOnly: boolean; custom?: boolean; liveSupported?: boolean };
@@ -42,7 +42,7 @@ const sign = (v: number | null | undefined) => v === null || v === undefined ? "
 
 /** readOnly: results only (Backtest Lab) — no selection checkboxes. */
 export function StrategyBoard({ options, value, onChange, readOnly, instruments = [] }: { options: Opt[]; value: string[]; onChange: (v: string[]) => void; readOnly?: boolean; instruments?: Inst[] }) {
-  const [inst, setInst] = useState("ALL"); const [target, setTarget] = useState("BASKET");
+  const [inst, setInst] = useState("ALL"); const [target, setTarget] = useState("BASKET"); const crypto = useCrypto();
   const { data, reload } = usePoll<Lb>("/api/leaderboard", 2500);
   const [q, setQ] = useState(""); const [fam, setFam] = useState("ALL"); const [only, setOnly] = useState<"" | "robust" | "selected">("");
   const [iv, setIv] = useState<"5" | "15" | "D">("5"); const [open, setOpen] = useState<string | null>(null);
@@ -81,15 +81,16 @@ export function StrategyBoard({ options, value, onChange, readOnly, instruments 
         : <div className="actions" style={{ gap: 8 }}>
             <div className="tabs" title="Candle size for the backtest">{(["5", "15", "D"] as const).map(x => <button key={x} className={iv === x ? "on" : ""} onClick={() => setIv(x)}>{x === "D" ? "Daily (10y)" : `${x}-min`}</button>)}</div>
             <Select size="sm" width={200} value={target} onChange={setTarget} ariaLabel="Test on" search
-              options={[{ value: "BASKET", label: "Basket · 12 instruments", sub: "NIFTY, BANKNIFTY + 10 large-caps", group: "Default" },
-                ...instruments.map(i => ({ value: i.key, label: i.symbol, sub: i.name, group: i.instrumentType === "INDEX" ? "Indices" : "Stocks" }))]} />
+              options={[getVenue() === "DELTA" ? { value: "BASKET", label: "Crypto basket · 4", sub: "BTC, ETH, SOL, XRP perpetuals", group: "Default" } : { value: "BASKET", label: "Basket · 12 instruments", sub: "NIFTY, BANKNIFTY + 10 large-caps", group: "Default" },
+                ...instruments.map(i => ({ value: i.key, label: i.symbol, sub: i.name, group: i.instrumentType === "INDEX" ? "Indices" : "Stocks" })),
+                ...crypto.map(i => ({ value: i.key, label: i.symbol, sub: i.name, group: "₿ Crypto · Delta Exchange" }))]} />
             <button className="btn primary" onClick={runAll}>▶ {run ? "Re-run" : "Run"} backtest on all strategies</button></div>}
     </div>
 
     {run ? <div className="note" style={{ marginBottom: 12 }}>
       <b>Last backtest:</b> {istDateTime(run.createdAt)} · <b>{run.dataSource}</b> data · <b>{run.config.interval}</b> candles · {istDateTime(run.config.from)} → {istDateTime(run.config.to)} ·
       {" "}{run.config.instruments.length} instruments ({run.config.instruments.join(", ")}) · risk {run.config.riskPerTradePct}%/trade · slippage {run.config.slippageBps} bps + charges.
-      <br /><span className="muted">P&L is on the <b>underlying</b> (stock/index price), not option premium. <b>Robust ✓</b> = ≥50 trades, profit factor ≥ 1.1, and profitable in <b>both</b> the first 70% and the unseen last 30%.
+      <br /><span className="muted">{getVenue() === "DELTA" ? <>₿ Crypto: Delta perpetual futures, USD → ₹ at fixed rate, fees 0.05% + GST, funding not modelled.</> : <>P&L is on the <b>underlying</b> (stock/index price), not option premium.</>} <b>Robust ✓</b> = ≥50 trades, profit factor ≥ 1.1, and profitable in <b>both</b> the first 70% and the unseen last 30%.
       Past results do not guarantee future profit — paper-trade before trusting any strategy.</span>
     </div> : !st?.running && <div className="note warn" style={{ marginBottom: 12 }}>Abhi tak koi backtest nahi chala. "Run backtest" dabayein — saari strategies 1 saal ke 5-min data par test hongi (kuch minute lagenge).</div>}
     {st?.error && <p className="err">Backtest failed: {st.error}</p>}

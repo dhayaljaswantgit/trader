@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, usePoll, MultiSelect, Switch } from "../lib.tsx";
+import { api, usePoll, MultiSelect, Switch, getVenue } from "../lib.tsx";
 import { StrategyBoard } from "./StrategyBoard.tsx";
 
 type Inst = { key: string; symbol: string; name: string; instrumentType: string; fnoEligible: boolean; fnoLotSize: number | null };
@@ -15,7 +15,7 @@ export function Setup() {
   const save = async () => {
     setErr(""); setMsg("");
     try {
-      await api("/api/preferences", { method: "PUT", json: { styles: f.styles, segments: f.segments, strategies: f.strategies, autoPaper: f.autoPaper, autoStartDaily: f.autoStartDaily,
+      await api("/api/preferences", { method: "PUT", json: { styles: f.styles, segments: f.segments, strategies: f.strategies, autoPaper: f.autoPaper, autoStartDaily: f.autoStartDaily, autoEngine: f.autoEngine, minOneLot: f.minOneLot,
         instrumentKeys: selected.map(s => s.key), defaultCapital: f.defaultCapital, defaultMaxLoss: f.defaultMaxLoss, defaultMaxProfit: f.defaultMaxProfit === "" ? null : f.defaultMaxProfit, defaultRiskPct: f.defaultRiskPct, defaultMaxConsecutiveLosses: f.defaultMaxConsecutiveLosses } });
       setMsg("✓ Saved"); reload(); setTimeout(() => setMsg(""), 2500);
     } catch (e) { setErr((e as Error).message); }
@@ -36,9 +36,11 @@ export function Setup() {
     <section className="card">
       <h2>Trading style <span className="sub">— ek ya zyada choose karein</span></h2>
       <MultiSelect value={f.styles} onChange={v => set("styles", v)} options={[
-        { id: "INTRADAY", icon: "📈", label: "Intraday", sub: "5-min signals · 3:15 PM tak square-off" },
+        { id: "INTRADAY", icon: "📈", label: "Intraday", sub: getVenue() === "DELTA" ? "5-min signals · 24x7, koi square-off nahi" : "5-min signals · 3:15 PM tak square-off" },
         { id: "SCALPING", icon: "⚡", label: "Scalper", sub: "1-min signals · chhote target, tight stop" },
-        { id: "POSITIONAL", icon: "🌙", label: "Carry forward", sub: "15-min signals · position overnight reh sakti hai" }]} />
+        { id: "POSITIONAL", icon: "🌙", label: getVenue() === "DELTA" ? "Swing" : "Carry forward", sub: getVenue() === "DELTA" ? "15-min signals · bade target" : "15-min signals · position overnight reh sakti hai" }]} />
+      {getVenue() === "DELTA" ? <div className="note" style={{ marginTop: 20 }}>₿ <b>Delta Exchange:</b> sirf <b>perpetual futures</b> (BTCUSD, ETHUSD…) — long ya short, 24x7, koi square-off nahi.
+        Har trade 1 contract units mein (BTC = 0.001 BTC/contract), prices ₹ mein (USD × rate). Delta fees 0.05% + GST. Paper mode — koi asli order nahi.</div> : <>
       <h2 style={{ marginTop: 20 }}>Kisme trade karna hai <span className="sub">— segments (priority: Options → Futures → Equity)</span></h2>
       <MultiSelect value={f.segments} onChange={v => set("segments", v)} options={[
         { id: "OPTIONS", icon: "🎯", label: "Options", sub: "Sirf BUY (CE/PE) · ATM · max loss = premium" },
@@ -46,13 +48,16 @@ export function Setup() {
         { id: "EQUITY", icon: "🏦", label: "Equity (cash)", sub: "Stock khud · intraday short allowed" }]} />
       {f.segments.includes("FUTURES") && <div className="note warn" style={{ marginTop: 12 }}>Futures mein lot size bada hota hai — risk per trade chhota ho to "1 lot bhi risk budget se bada" ki wajah se entry skip hogi. Ye safety hai, bug nahi.</div>}
       {f.styles.includes("POSITIONAL") && <div className="note warn" style={{ marginTop: 12 }}>Carry forward mein overnight gap risk hota hai — stop-loss gap par apne price par fill nahi hota.</div>}
+      </>}
     </section>
 
     <section className="card">
       <StrategyBoard instruments={p.selected} options={p.strategyOptions} value={f.strategies} onChange={v => set("strategies", v)} />
       <div className="grid g2" style={{ marginTop: 18 }}>
+        <Switch on={f.minOneLot !== false} onChange={v => set("minOneLot", v)} label="Minimum 1 lot" sub="Risk % budget 1 lot ke liye kam ho, par 1 lot ka risk din ke max-loss ke andar ho → 1 lot le lo (off = strict risk %)" />
+        <Switch on={!!f.autoEngine} onChange={v => set("autoEngine", v)} label="Auto-start engine" sub="Market khulte hi auto engine apne aap chalu (roz Start dabane ki zaroorat nahi)" />
         <Switch on={f.autoPaper} onChange={v => set("autoPaper", v)} label="Auto paper trading" sub="ENTER signal par risk check ke baad paper trade apne aap lega" />
-        <Switch on={f.autoStartDaily} onChange={v => set("autoStartDaily", v)} label="Har din auto-start" sub="09:15 IST par neeche ki default limits se din apne aap shuru" />
+        <Switch on={f.autoStartDaily} onChange={v => set("autoStartDaily", v)} label="Har din auto-start" sub={getVenue() === "DELTA" ? "Har naye din (00:00 IST) neeche ki default limits se session apne aap shuru" : "09:15 IST par neeche ki default limits se din apne aap shuru"} />
       </div>
     </section>
 
@@ -69,21 +74,23 @@ export function Setup() {
 
     <section className="card">
       <div className="card-head"><h2>Stocks & indices <span className="sub">— {selected.length} selected (max 80)</span></h2>
-        <button className="btn sm" onClick={() => preset("idx")}>+ Sabhi F&O indices</button>
-        <button className="btn sm" onClick={() => preset("n50")}>+ NIFTY 50 stocks</button>
+        {getVenue() === "DELTA" ? <button className="btn sm" onClick={async () => { const l = await api<Inst[]>("/api/instruments?kind=CRYPTO_PERP&limit=400");
+            addMany(l.filter(i => ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD"].includes(i.symbol))); setMsg("+ BTC, ETH, SOL, XRP added — Save karna na bhoolein"); }}>+ BTC · ETH · SOL · XRP</button>
+          : <><button className="btn sm" onClick={() => preset("idx")}>+ Sabhi F&O indices</button>
+        <button className="btn sm" onClick={() => preset("n50")}>+ NIFTY 50 stocks</button></>}
         <button className="btn sm" disabled={!selected.length} onClick={() => setSelected([])}>Clear all</button></div>
-      {selected.length > 25 && f.styles.includes("SCALPING") && <div className="note warn" style={{ marginBottom: 12 }}>{selected.length} instruments + Scalper (1-min): har minute {selected.length} candle requests jayengi (Dhan rate limits). Signals thode der se aa sakte hain — scalping ke liye 10–15 liquid instruments behtar hain.</div>}
+      {selected.length > 25 && f.styles.includes("SCALPING") && <div className="note warn" style={{ marginBottom: 12 }}>{selected.length} instruments + Scalper (1-min): har minute {selected.length} candle requests jayengi ({getVenue() === "DELTA" ? "Delta" : "Dhan"} rate limits). Signals thode der se aa sakte hain — scalping ke liye 10–15 liquid instruments behtar hain.</div>}
       <div className="seg" style={{ marginBottom: 14 }}>
         {selected.map(s => <button key={s.key} className="opt on" style={{ minWidth: 0, padding: "6px 10px" }} onClick={() => setSelected(selected.filter(x => x.key !== s.key))} title="Remove">
-          <span><b style={{ fontSize: 13 }}>{s.symbol} ✕</b><small>{s.instrumentType === "INDEX" ? "Index" : s.fnoEligible ? "F&O" : "Cash only"}</small></span></button>)}
+          <span><b style={{ fontSize: 13 }}>{s.symbol} ✕</b><small>{s.instrumentType === "CRYPTO_PERP" ? "Perpetual" : s.instrumentType === "INDEX" ? "Index" : s.fnoEligible ? "F&O" : "Cash only"}</small></span></button>)}
       </div>
-      <input className="input" placeholder="🔍  Search NSE stock / index (e.g. TATAMOTORS, INFY, NIFTY)…" value={q} onChange={e => setQ(e.target.value)} />
+      <input className="input" placeholder={getVenue() === "DELTA" ? "🔍  Search crypto perpetual (e.g. BTC, ETH, SOL)…" : "🔍  Search NSE stock / index (e.g. TATAMOTORS, INFY, NIFTY)…"} value={q} onChange={e => setQ(e.target.value)} />
       <div className="table-wrap" style={{ maxHeight: 300, overflowY: "auto", marginTop: 8 }}><table><tbody>
         {results.map(r => <tr key={r.key} className="click" onClick={() => !has(r.key) && setSelected([...selected, r])}>
-          <td className="sym"><b>{r.symbol}</b><small>{r.name}</small></td><td>{r.instrumentType === "INDEX" ? <span className="pill NEUTRAL">INDEX</span> : r.fnoEligible ? <span className="pill UP">F&O · lot {r.fnoLotSize}</span> : <span className="pill NO_TRADE">CASH ONLY</span>}</td>
+          <td className="sym"><b>{r.symbol}</b><small>{r.name}</small></td><td>{r.instrumentType === "CRYPTO_PERP" ? <span className="pill UP">PERP · ₿</span> : r.instrumentType === "INDEX" ? <span className="pill NEUTRAL">INDEX</span> : r.fnoEligible ? <span className="pill UP">F&O · lot {r.fnoLotSize}</span> : <span className="pill NO_TRADE">CASH ONLY</span>}</td>
           <td className="r">{has(r.key) ? <span className="muted">✓ added</span> : <span className="btn sm">+ Add</span>}</td></tr>)}
       </tbody></table></div>
-      {nonFno.length > 0 && (f.segments.includes("OPTIONS") || f.segments.includes("FUTURES")) && <div className="note warn" style={{ marginTop: 12 }}>{nonFno.map(n => n.symbol).join(", ")} F&O mein listed nahi — inke liye sirf Equity segment kaam karega.</div>}
+      {!(getVenue() === "DELTA") && nonFno.length > 0 && (f.segments.includes("OPTIONS") || f.segments.includes("FUTURES")) && <div className="note warn" style={{ marginTop: 12 }}>{nonFno.map(n => n.symbol).join(", ")} F&O mein listed nahi — inke liye sirf Equity segment kaam karega.</div>}
     </section>
 
     <div className="actions" style={{ position: "sticky", bottom: 16, justifyContent: "flex-end", alignItems: "center" }}>

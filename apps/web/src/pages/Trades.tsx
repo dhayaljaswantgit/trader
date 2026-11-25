@@ -1,3 +1,4 @@
+import { StopCell } from "./StopCell.tsx";
 import { usePoll, fmt, inr, Pnl, LineChart, istDateTime } from "../lib.tsx";
 import { livePnl, type Trade } from "./Dashboard.tsx";
 
@@ -37,6 +38,6 @@ function TradeTable({ rows, live }: { rows: Trade[]; live?: boolean }) {
       <td><span className={`pill ${t.side}`}>{t.side}</span></td><td className="r num">{t.quantity}</td><td className="r num">{fmt(t.entryPrice)}</td>
       <td className="r num">{fmt(live ? t.lastPrice : t.exitPrice)}</td><td className="r num muted">{fmt(Number(t.entryCharges) + Number(t.exitCharges))}</td>
       <td className="r"><Pnl v={live ? livePnl(t) : t.pnlInr} /></td>
-      <td>{live ? <span className="num"><span className="down">{fmt(t.stopPrice)}</span> / <span className="up">{fmt(t.targetPrice)}</span></span> : <span className="pill NEUTRAL">{t.exitReason}</span>}</td>
+      <td>{live ? <StopCell t={t} /> : <span className="pill NEUTRAL">{t.exitReason}</span>}</td>
       <td className="muted" style={{ fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }} title={t.fillNote}>{t.fillNote}</td></tr>)}</tbody></table></div>;
 }

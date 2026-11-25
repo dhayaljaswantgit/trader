@@ -164,21 +164,21 @@ export function dayContext(b: Bar[], barSec: number, orMinutes: number[] = [15, 
   const ctx: DayContext = { newDay: [], barOfDay: [], dayOpen: [], prevH: mk(), prevL: mk(), prevC: mk(), sessHiBefore: mk(), sessLoBefore: mk(), minuteEnd: [],
     or: Object.fromEntries(orMinutes.map(m => [m, { hi: mk(), lo: mk() }])), lunchHi: mk(), lunchLo: mk() };
   let day = -1, k = 0, open = 0, hi = -Infinity, lo = Infinity, close = 0, pH: number | null = null, pL: number | null = null, pC: number | null = null;
-  const orHi: Record<number, number> = {}, orLo: Record<number, number> = {}; let lh = -Infinity, ll = Infinity;
+  const orHi: Record<number, number> = {}, orLo: Record<number, number> = {}; let lh = -Infinity, ll = Infinity, sessStart = 555;
   for (let i = 0; i < n; i++) {
     const x = b[i]!, d = istDay(x.t), start = istMinutes(x.t), end = start + barSec / 60;
     const nd = d !== day;
     if (nd) {
       if (day !== -1) { pH = hi; pL = lo; pC = close; }
-      day = d; k = 0; open = x.o; hi = -Infinity; lo = Infinity; lh = -Infinity; ll = Infinity;
+      day = d; k = 0; open = x.o; hi = -Infinity; lo = Infinity; lh = -Infinity; ll = Infinity; sessStart = start; // first candle of the day (09:15 NSE, 00:00 crypto)
       for (const m of orMinutes) { orHi[m] = -Infinity; orLo[m] = Infinity; }
     } else k++;
     ctx.newDay.push(nd); ctx.barOfDay.push(k); ctx.dayOpen.push(open); ctx.minuteEnd.push(end);
     ctx.prevH[i] = pH; ctx.prevL[i] = pL; ctx.prevC[i] = pC;
     ctx.sessHiBefore[i] = Number.isFinite(hi) ? hi : null; ctx.sessLoBefore[i] = Number.isFinite(lo) ? lo : null;
     for (const m of orMinutes) {
-      if (start < 555 + m) { orHi[m] = Math.max(orHi[m]!, x.h); orLo[m] = Math.min(orLo[m]!, x.l); }
-      if (end >= 555 + m && Number.isFinite(orHi[m]!)) { ctx.or[m]!.hi[i] = orHi[m]!; ctx.or[m]!.lo[i] = orLo[m]!; }
+      if (start < sessStart + m) { orHi[m] = Math.max(orHi[m]!, x.h); orLo[m] = Math.min(orLo[m]!, x.l); }
+      if (end >= sessStart + m && Number.isFinite(orHi[m]!)) { ctx.or[m]!.hi[i] = orHi[m]!; ctx.or[m]!.lo[i] = orLo[m]!; }
     }
     if (start >= 720 && start < 810) { lh = Math.max(lh, x.h); ll = Math.min(ll, x.l); }
     if (end >= 810 && Number.isFinite(lh)) { ctx.lunchHi[i] = lh; ctx.lunchLo[i] = ll; }

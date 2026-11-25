@@ -8,7 +8,7 @@
  */
 import { type Bar, istDay, istMinutes } from "./types.ts";
 import { adx, atr, ema, rsi, sma, type Series } from "./indicators.ts";
-import { dayContext, supertrend, vwapBands } from "./ta.ts";
+import { dayContext, donchian, supertrend, vwapBands } from "./ta.ts";
 import { barSeconds } from "./signal.ts";
 import { computeMetrics, type BacktestResult, type BtTrade } from "./backtest.ts";
 
@@ -23,6 +23,7 @@ export type Operand =
   | { k: "ema" | "sma" | "rsi" | "atr" | "adx"; n: number }
   | { k: "vwap" }
   | { k: "supertrend"; n: number; m: number }
+  | { k: "highest" | "lowest"; n: number }    // highest high / lowest low of the PREVIOUS n candles (Donchian channel)
   | { k: "value"; v: number };
 export type Op = ">" | "<" | ">=" | "<=" | "crossAbove" | "crossBelow";
 export type Condition =
@@ -36,7 +37,7 @@ export interface SideRules { enabled: boolean; entry: Condition[]; exit: Conditi
 export interface StrategySpec {
   name: string; description?: string; version?: number;
   /** Candle size used for LIVE paper trading (backtests use the timeframe you pick). Default 5-min. */
-  timeframe?: "1" | "5" | "15";
+  timeframe?: "1" | "5" | "15" | "D";
   /** Instruments this strategy trades LIVE (instrument keys). Empty = every instrument selected in Trade Setup. */
   instruments?: string[];
   entryMode: "barClose" | "dayOpen";
@@ -56,7 +57,7 @@ export interface StrategySpec {
    *  mode fixed: `lots` lots · capital: floor(equity / capitalPerLot) · risk: lots so a stop hit ≈ riskPct% of equity (capped by capital). */
   sizing: { qty: number; delta: number; mode?: "fixed" | "capital" | "risk"; lots?: number; capitalPerLot?: number; riskPct?: number; maxLots?: number };
   /** perTrade = ₹ per round trip for the first lot; perExtraLot = ₹ added for each extra lot; slippage points per side. */
-  costs: { perTrade: number; slippagePoints: number; perExtraLot?: number };
+  costs: { perTrade: number; slippagePoints: number; perExtraLot?: number; /** % of notional per side (crypto fees, GST included) */ feePct?: number };
 }
 
 // ------------------------------------------------------------------ evaluation context
@@ -95,6 +96,7 @@ class Ctx {
     if (o.k === "ema") s = ema(c, o.n); else if (o.k === "sma") s = sma(c, o.n); else if (o.k === "rsi") s = rsi(c, o.n);
     else if (o.k === "atr") s = atr(this.b, o.n); else if (o.k === "adx") s = adx(this.b, o.n); else if (o.k === "vwap") s = vwapBands(this.b).vwap;
     else if (o.k === "supertrend") s = supertrend(this.b, o.n, o.m).line;
+    else if (o.k === "highest" || o.k === "lowest") { const d = donchian(this.b, o.n); s = o.k === "highest" ? d.hi : d.lo; }
     else if (o.k === "orHigh" || o.k === "orLow") { const d = dayContext(this.b, barSeconds(this.b), [o.m]); s = o.k === "orHigh" ? d.or[o.m]!.hi : d.or[o.m]!.lo; }
     if (s) this.memo.set(key, s); return s;
   }
@@ -152,7 +154,7 @@ const allTrue = (cx: Ctx, cs: Condition[], i: number, atOpen: boolean) => cs.len
 const anyTrue = (cx: Ctx, cs: Condition[], i: number, since: number) => cs.some(c => condTrue(cx, c, i, false, since));
 
 // ------------------------------------------------------------------ simulator
-export interface SpecBacktestConfig { daily: boolean; startingCapital: number; oosFraction: number; slippagePointsOverride?: number }
+export interface SpecBacktestConfig { daily: boolean; startingCapital: number; oosFraction: number; slippagePointsOverride?: number; market?: "NSE" | "CRYPTO" }
 const DEFAULT_CAPITAL_PER_LOT = 15000; // ≈ ATM NIFTY option premium × lot — an assumption, editable per strategy
 
 function simulateSpec(bars: Bar[], spec: StrategySpec, cfg: SpecBacktestConfig) {
@@ -178,7 +180,8 @@ function simulateSpec(bars: Bar[], spec: StrategySpec, cfg: SpecBacktestConfig) 
   const close = (i: number, px: number, reason: string) => {
     if (!pos) return;
     const fill = px - pos.d * slip, pts = (fill - pos.entry) * pos.d, gross = pts * sz.delta * sz.qty * pos.lots;
-    const charges = spec.costs.perTrade + (pos.lots - 1) * (spec.costs.perExtraLot ?? 15), net = gross - charges;
+    const notional = (pos.entry + fill) * sz.qty * pos.lots; // entry + exit turnover
+    const charges = spec.costs.perTrade + (pos.lots - 1) * (spec.costs.perExtraLot ?? 15) + notional * (spec.costs.feePct ?? 0) / 100, net = gross - charges;
     equity += net; dayNet += net;
     trades.push({ n: trades.length + 1, side: pos.d === 1 ? "LONG" : "SHORT", entryTime: pos.t, exitTime: bars[i]!.t, entry: r2(pos.entry), exit: r2(fill), qty: sz.qty * pos.lots,
       stop: r2(pos.stop ?? NaN), target: r2(pos.target ?? NaN), grossPnl: r2(gross), charges: r2(charges), netPnl: r2(net), exitReason: reason, sample: pos.t >= oosStart ? "OUT" : "IN" });
@@ -204,10 +207,11 @@ function simulateSpec(bars: Bar[], spec: StrategySpec, cfg: SpecBacktestConfig) 
     if (pos.target != null && (L ? x.h >= pos.target : x.l <= pos.target)) return close(i, (L ? x.o > pos.target : x.o < pos.target) && i > pos.i ? x.o : pos.target, "TARGET");
     const rules = L ? spec.long.exit : spec.short.exit;
     if (anyTrue(cx, rules, i, pos.i)) return close(i, x.c, "EXIT_RULE");
-    if (!cfg.daily && cx.day.minuteEnd[i]! >= sq) return close(i, x.c, "SQUARE_OFF");
+    const nse = cfg.market !== "CRYPTO";
+    if (!cfg.daily && nse && cx.day.minuteEnd[i]! >= sq) return close(i, x.c, "SQUARE_OFF");
     if (!cfg.daily && wins.length && spec.session.exitAtWindowEnd && !inWin(cx.day.minuteEnd[i]!) ) return close(i, x.c, "WINDOW_END");
     const nextNewDay = i + 1 < bars.length && istDay(bars[i + 1]!.t) !== istDay(x.t);
-    if (!cfg.daily && nextNewDay) return close(i, x.c, "SESSION_END");
+    if (!cfg.daily && nse && nextNewDay) return close(i, x.c, "SESSION_END");
     // trailing stop, updated on the candle close
     const gain = (x.c - pos.entry) * pos.d; pos.best = L ? Math.max(pos.best, x.c) : Math.min(pos.best, x.c);
     const tr = spec.trailing;
@@ -235,8 +239,8 @@ function simulateSpec(bars: Bar[], spec: StrategySpec, cfg: SpecBacktestConfig) 
     }
     // b) bar-close entry decided on the previous candle → fill at this candle's open
     if (spec.entryMode === "barClose" && canEnter() && i >= 2) {
-      const p = i - 1, sameDay = cfg.daily || !cx.day.newDay[i];
-      const okTime = cfg.daily || (cx.day.minuteEnd[p]! <= lastEntry && inWin(cx.day.minuteEnd[p]!));
+      const p = i - 1, sameDay = cfg.daily || cfg.market === "CRYPTO" || !cx.day.newDay[i];
+      const okTime = cfg.daily || ((cfg.market === "CRYPTO" || cx.day.minuteEnd[p]! <= lastEntry) && inWin(cx.day.minuteEnd[p]!));
       if (sameDay && okTime) {
         if (spec.long.enabled && allTrue(cx, spec.long.entry, p, false)) open(i, 1, x.o);
         else if (spec.short.enabled && allTrue(cx, spec.short.entry, p, false)) open(i, -1, x.o);
@@ -322,7 +326,7 @@ const targetFor = (spec: StrategySpec, d: 1 | -1, entry: number, stop: number | 
  * Entry decision on the LATEST CLOSED candle (bars must contain only completed candles, oldest first).
  * The caller enforces per-day limits (trades today, day lock) and the "already in a trade" rule.
  */
-export function liveEntrySignal(bars: Bar[], spec: StrategySpec): LiveEntry | null {
+export function liveEntrySignal(bars: Bar[], spec: StrategySpec, market: "NSE" | "CRYPTO" = "NSE"): LiveEntry | null {
   const i = bars.length - 1; if (i < 2) return null;
   const cx = new Ctx(bars, false), x = bars[i]!;
   const wins = (spec.session.windows ?? []).map(w => [hhmm(w.from), hhmm(w.to)] as const);
@@ -332,7 +336,7 @@ export function liveEntrySignal(bars: Bar[], spec: StrategySpec): LiveEntry | nu
     // decided at today's first candle open (only open-time information), acted on once it has printed
     if (!cx.day.newDay[i] || !inWin(istMinutes(x.t))) return null; atOpen = true;
   } else {
-    const m = cx.day.minuteEnd[i]!; if (m > hhmm(spec.session.noEntryAfter) || !inWin(m)) return null;
+    const m = cx.day.minuteEnd[i]!; if ((market === "NSE" && m > hhmm(spec.session.noEntryAfter)) || !inWin(m)) return null;
   }
   if (spec.long.enabled && allTrue(cx, spec.long.entry, i, atOpen)) side = 1;
   else if (spec.short.enabled && allTrue(cx, spec.short.entry, i, atOpen)) side = -1;
@@ -347,7 +351,7 @@ export interface LiveState { dir: 1 | -1; entry: number; stop: number | null; ta
  * Replays the open position over every completed candle since entry (deterministic, same as the backtest) and returns
  * the current trailing stop and whether an exit (exit rule / stop / target / window end / square-off) has triggered.
  */
-export function liveManage(bars: Bar[], spec: StrategySpec, st: LiveState): { exit: string | null; stop: number | null; best: number } {
+export function liveManage(bars: Bar[], spec: StrategySpec, st: LiveState, market: "NSE" | "CRYPTO" = "NSE"): { exit: string | null; stop: number | null; best: number } {
   const cx = new Ctx(bars, false), L = st.dir === 1;
   const startIdx = bars.findIndex(b => b.t >= st.entryT); if (startIdx < 0) return { exit: null, stop: st.stop, best: st.entry };
   const sq = hhmm(spec.session.squareOff), wins = (spec.session.windows ?? []).map(w => [hhmm(w.from), hhmm(w.to)] as const);
@@ -358,7 +362,7 @@ export function liveManage(bars: Bar[], spec: StrategySpec, st: LiveState): { ex
     if (stop != null && (L ? x.l <= stop : x.h >= stop)) return { exit: "STOP", stop, best };
     if (st.target != null && (L ? x.h >= st.target : x.l <= st.target)) return { exit: "TARGET", stop, best };
     if (anyTrue(cx, L ? spec.long.exit : spec.short.exit, i, startIdx)) return { exit: "EXIT_RULE", stop, best };
-    if (cx.day.minuteEnd[i]! >= sq) return { exit: "SQUARE_OFF", stop, best };
+    if (market === "NSE" && cx.day.minuteEnd[i]! >= sq) return { exit: "SQUARE_OFF", stop, best };
     if (wins.length && spec.session.exitAtWindowEnd && !inWin(cx.day.minuteEnd[i]!)) return { exit: "WINDOW_END", stop, best };
     const gain = (x.c - st.entry) * st.dir; best = L ? Math.max(best, x.c) : Math.min(best, x.c);
     const tr = spec.trailing;
@@ -367,4 +371,14 @@ export function liveManage(bars: Bar[], spec: StrategySpec, st: LiveState): { ex
     else if (tr.type === "trail" && tr.every > 0 && gain >= tr.every) { const ns = best - st.dir * tr.by; if (stop == null || (L ? ns > stop : ns < stop)) stop = ns; }
   }
   return { exit: null, stop, best };
+}
+
+/**
+ * Adapt a strategy to a crypto perpetual: 1 lot = 1 contract (e.g. 0.001 BTC), futures P&L (delta 1),
+ * margin per contract = notional ÷ leverage, fees as % of notional (taker + 18% GST), slippage in price units.
+ */
+export function cryptoSpec(spec: StrategySpec, o: { contractValue: number; refPrice: number; leverage?: number; takerFee?: number; slippagePrice?: number }): StrategySpec {
+  const lev = o.leverage ?? 10, fee = (o.takerFee ?? 0.0005) * 100 * 1.18;
+  return { ...spec, sizing: { ...spec.sizing, qty: o.contractValue, delta: 1, capitalPerLot: Math.max(1, (o.refPrice * o.contractValue) / lev), maxLots: spec.sizing.maxLots ?? 1000 },
+    costs: { ...spec.costs, perTrade: 0, perExtraLot: 0, feePct: fee, slippagePoints: o.slippagePrice ?? spec.costs.slippagePoints } };
 }

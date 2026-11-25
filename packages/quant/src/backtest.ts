@@ -6,6 +6,8 @@ export interface BacktestConfig {
   strategyId: string; params?: Partial<StrategyParams>; daily: boolean;
   startingCapital: number; riskPerTradePct: number; slippageBps: number; product: ProductKind;
   allowShort: boolean; squareOffIst: string; maxHoldBars: number; lotSize: number; oosFraction: number;
+  /** CRYPTO = 24x7 market: no square-off, no forced close at day change, no entry-time limits. */
+  market?: "NSE" | "CRYPTO";
 }
 export interface BtTrade {
   n: number; side: "LONG" | "SHORT"; entryTime: number; exitTime: number; entry: number; exit: number; qty: number;
@@ -57,7 +59,7 @@ export function computeMetrics(trades: BtTrade[], startingCapital: number, equit
 }
 
 function simulate(bars: Bar[], cfg: BacktestConfig) {
-  const p = { ...DEFAULT_PARAMS, ...cfg.params };
+  const p = { ...DEFAULT_PARAMS, ...cfg.params, ...(cfg.market === "CRYPTO" ? { noEntryBeforeIst: "00:00", noEntryAfterIst: "23:59" } : {}) };
   const strat = STRATEGIES[cfg.strategyId]; if (!strat) throw new Error(`Unknown strategy ${cfg.strategyId}`);
   const pc = precompute(bars, p, cfg.daily);
   const slip = cfg.slippageBps / 10000, sq = hhmm(cfg.squareOffIst);
@@ -103,18 +105,18 @@ function simulate(bars: Bar[], cfg: BacktestConfig) {
       const L = pos.side === "LONG";
       const newDay = istDay(x.t) !== istDay(prev.t);
       const ruleExit = strat.exitRule ? strat.exitRule(bars, i - 1, pos.side) : null; // decided on the previous close
-      if (!cfg.daily && newDay) { close(i - 1, prev.c, "SESSION_END"); }
+      if (!cfg.daily && newDay && cfg.market !== "CRYPTO") { close(i - 1, prev.c, "SESSION_END"); }
       else if (ruleExit) close(i, x.o, "EXIT_RULE");
       else if (L ? x.o <= pos.stop : x.o >= pos.stop) close(i, x.o, "STOP_GAP");
       else if (L ? x.l <= pos.stop : x.h >= pos.stop) close(i, pos.stop, "STOP");
       else if (L ? x.o >= pos.target : x.o <= pos.target) close(i, x.o, "TARGET_GAP");
       else if (L ? x.h >= pos.target : x.l <= pos.target) close(i, pos.target, "TARGET");
-      else if (!cfg.daily && istMinutes(x.t) >= sq) close(i, x.c, "SQUARE_OFF");
+      else if (!cfg.daily && cfg.market !== "CRYPTO" && istMinutes(x.t) >= sq) close(i, x.c, "SQUARE_OFF");
       else if (pos.bars >= maxHold) close(i, x.c, "TIME_STOP");
     }
     // 2) Signal on CLOSED previous bar -> enter at this bar's open (no look-ahead)
     if (!pos && i >= 2 && !strat.entryAtClose) {
-      if (!cfg.daily && (istDay(x.t) !== istDay(prev.t) || istMinutes(x.t) >= sq)) continue;
+      if (!cfg.daily && cfg.market !== "CRYPTO" && (istDay(x.t) !== istDay(prev.t) || istMinutes(x.t) >= sq)) continue;
       open(strat.evaluate(bars, i - 1, pc, p, cfg.daily), x.o, x.t);
     }
     // 2b) Close-entry strategies: signal on THIS bar's close, filled at that close (e.g. buy at 15:25).
