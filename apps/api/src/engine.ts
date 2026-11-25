@@ -326,6 +326,33 @@ export class PaperEngine {
     if (rejections.length) { this.log(`${u.symbol} ENTER skipped — ${rejections.join(" | ")}`); await this.audit("ENTRY_REJECTED", { underlying: u.symbol, reasons: rejections }, correlationId); }
   }
 
+  /** Manual "Take now" for a skipped custom-strategy ENTER signal (≤ 10 min old). Same sizing + risk checks as auto, at the current price. */
+  async takeSignal(id: string): Promise<{ ok: boolean; message: string }> {
+    const g = await this.prisma.signal.findUnique({ where: { id } });
+    if (!g || g.venue !== this.venue || g.action !== "ENTER") return { ok: false, message: "Signal nahi mila" };
+    if (this.clock().getTime() - g.createdAt.getTime() > 10 * 60000) return { ok: false, message: "10 min se purana signal — ab nahi le sakte" };
+    if (await this.prisma.paperTrade.count({ where: { correlationId: { startsWith: g.correlationId } } })) return { ok: false, message: "Is signal par trade pehle hi ho chuka" };
+    const [sid, key] = g.correlationId.split("|"); if (!sid?.startsWith("custom:")) return { ok: false, message: "Sirf Strategy Builder signals manually liye ja sakte hain" };
+    const row = await this.prisma.customStrategy.findUnique({ where: { id: sid.slice(7) } }), u = await this.prisma.instrument.findUnique({ where: { key: key! } });
+    if (!row || !u) return { ok: false, message: "Strategy/instrument nahi mila" };
+    const mine = { meta: { path: ["specId"], equals: row.id }, underlying: u.symbol, venue: this.venue, closedAt: null } as const;
+    if (await this.prisma.paperTrade.count({ where: mine })) return { ok: false, message: "Is strategy ki position pehle se open hai" };
+    const session = await this.ensureSession(); if (!session) return { ok: false, message: "Aaj ka session nahi hai" };
+    const prefs = await this.prisma.preferences.findUnique({ where: { id: this.prefId } });
+    const spec = row.spec as unknown as StrategySpec, tf: 1 | 5 | 15 | "D" = spec.timeframe === "D" ? "D" : (Number(spec.timeframe ?? 5) as 1 | 5 | 15);
+    const dirN = g.direction === "BULLISH" ? 1 : -1, barTime = Math.floor((g.barTime ?? g.createdAt).getTime() / 1000), tfSec = tf === "D" ? 86400 : tf * 60;
+    const ssig: StrategySignal = { strategyId: sid, strategyVersion: "custom", barTime, direction: g.direction as StrategySignal["direction"], action: "ENTER", reasons: ["manual take"], checks: [], entry: g.entry, stop: g.stop, target: null };
+    const before = await this.prisma.paperTrade.count({ where: { correlationId: { startsWith: g.correlationId } } });
+    this.log(`${u.symbol}: ${row.name} — skipped signal MANUALLY liya`);
+    await this.audit("SIGNAL_TAKEN_MANUALLY", { signal: g.correlationId, strategy: row.name }, g.correlationId);
+    await this.tryEnter(ssig, u, "INTRADAY", prefs?.segments ?? ["OPTIONS"], session, `${g.correlationId}|M${Date.now().toString(36)}`,
+      { custom: true, specId: row.id, uKey: u.key, dir: dirN, uEntry: g.entry, uStop: g.stop, uTarget: g.target, entryT: barTime + tfSec, tf, curStop: g.stop, sizing: spec.sizing, manual: true }, `${row.name} (custom)`);
+    const after = await this.prisma.paperTrade.count({ where: { correlationId: { startsWith: g.correlationId } } });
+    if (after > before) return { ok: true, message: "✓ Trade le liya" };
+    const rej = await this.prisma.auditEvent.findFirst({ where: { action: "ENTRY_REJECTED", correlationId: { startsWith: g.correlationId } }, orderBy: { at: "desc" } });
+    return { ok: false, message: `Trade nahi hua: ${((rej?.details as { reasons?: string[] })?.reasons ?? ["unknown"]).join(" | ")}` };
+  }
+
   /** Strategy Builder strategies: entry decided by the same engine as the backtest, on the spot index candles. */
   async runCustomStrategies(prefs: { strategies: string[]; instrumentKeys: string[]; segments: string[]; autoPaper: boolean }, session: TradingSession, now: Date) {
     const ids = prefs.strategies.filter(s => s.startsWith("custom:")).map(s => s.slice(7)); if (!ids.length) return;

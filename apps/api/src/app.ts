@@ -352,7 +352,22 @@ export async function buildApp(opts: { prisma: PrismaClient; clock?: () => Date;
   // ---------- signals / trades ----------
   app.get("/api/signals", async (req) => {
     const { action } = req.query as { action?: string };
-    return prisma.signal.findMany({ where: action ? { action, venue: venue() } : { venue: venue() }, orderBy: { createdAt: "desc" }, take: 100 });
+    const rows = await prisma.signal.findMany({ where: action ? { action, venue: venue() } : { venue: venue() }, orderBy: { createdAt: "desc" }, take: 100 });
+    // status of each ENTER signal: traded? skipped why? still takeable manually (≤ 10 min)?
+    const recent = rows.filter(r => r.action === "ENTER" && clock().getTime() - r.createdAt.getTime() < 6 * 3600000);
+    const ids = recent.map(r => r.correlationId);
+    const trades = ids.length ? await prisma.paperTrade.findMany({ where: { OR: ids.map(c => ({ correlationId: { startsWith: c } })) }, select: { correlationId: true, mode: true } }) : [];
+    const rejs = ids.length ? await prisma.auditEvent.findMany({ where: { action: "ENTRY_REJECTED", OR: ids.map(c => ({ correlationId: { startsWith: c } })) }, orderBy: { at: "desc" } }) : [];
+    return rows.map(r => {
+      const t = trades.find(x => x.correlationId.startsWith(r.correlationId)), rj = rejs.find(x => x.correlationId?.startsWith(r.correlationId));
+      const status = r.action !== "ENTER" ? null : t ? (t.mode === "LIVE" ? "TRADED_LIVE" : "TRADED") : rj ? "SKIPPED" : null;
+      return { ...r, status, skipReason: rj ? ((rj.details as { reasons?: string[] }).reasons ?? []).join(" | ") : null,
+        takeable: status === "SKIPPED" && r.correlationId.startsWith("custom:") && clock().getTime() - r.createdAt.getTime() <= 10 * 60000 };
+    });
+  });
+  app.post("/api/signals/:id/take", async (req, reply) => {
+    const r = await eng().takeSignal((req.params as { id: string }).id);
+    return r.ok ? r : reply.code(400).send({ error: "TAKE_FAILED", message: r.message });
   });
   const modeOf = (req: { query: unknown }) => { const m = (req.query as { mode?: string }).mode; return m === "LIVE" || m === "PAPER" ? { mode: m } : {}; };
   app.get("/api/positions", async req => {

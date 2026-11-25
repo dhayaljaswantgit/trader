@@ -251,6 +251,12 @@ describe("live safety", () => {
     expect(h).not.toMatch(/accessToken/);
     expect(JSON.parse(h)).toMatchObject({ mode: "PAPER", liveTrading: false });
   });
+  it("take-now refuses unknown signals and signals list carries status", async () => {
+    const r = await inject("POST", "/api/signals/does-not-exist/take", {});
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body).message).toMatch(/nahi mila/);
+    expect((await inject("GET", "/api/signals?action=ENTER")).statusCode).toBe(200);
+  });
   it("LIVE switch needs the typed confirm and is Dhan-only", async () => {
     expect((await inject("PUT", "/api/preferences", { liveTrading: true })).statusCode).toBe(400);
     expect((await inject("PUT", "/api/preferences?venue=DELTA", { liveTrading: true, liveConfirm: "LIVE" })).statusCode).toBe(400);

@@ -84,7 +84,14 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
   const { data: pos, reload: reloadPos } = usePoll<{ open: Trade[]; closed: Trade[]; today?: Record<"PAPER" | "LIVE", { realized: number; unrealized: number; trades: number }> }>("/api/positions", 3000);
   const { data: eng, reload: reloadEng } = usePoll<{ running: boolean; log: string[]; lastError: string | null }>("/api/engine", 3000);
   const { data: prefs, reload: reloadPrefs } = usePoll<any>("/api/preferences", 0);
-  const { data: sigs } = usePoll<any[]>("/api/signals?action=ENTER", 6000);
+  const { data: sigs, reload: reloadSigs } = usePoll<any[]>("/api/signals?action=ENTER", 6000);
+  const [taking, setTaking] = useState(""); const [takeMsg, setTakeMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const take = async (id: string) => {
+    setTaking(id); setTakeMsg(null);
+    try { const r = await api<{ message: string }>(`/api/signals/${id}/take`, { method: "POST" }); setTakeMsg({ ok: true, text: r.message }); }
+    catch (e) { setTakeMsg({ ok: false, text: (e as Error).message }); }
+    finally { setTaking(""); reloadSigs(); reloadPos(); }
+  };
   const [lev, setLev] = useState<number | null>(null);
   useEffect(() => { if (getVenue() === "DELTA") api<{ leverage: number }>("/api/delta/status").then(d => setLev(Number(d.leverage) || null)).catch(() => {}); }, []);
   const [modal, setModal] = useState<"" | "close" | "stop" | "live">(""); const [editing, setEditing] = useState(false); const [plan, setPlan] = useState(false); const [err, setErr] = useState("");
@@ -182,9 +189,14 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
     <section className="card">
       <div className="card-head"><h2>Latest ENTER signals</h2><button className="btn sm" onClick={() => go("signals")}>Signal explorer →</button></div>
       {!sigs?.length ? <div className="empty">Abhi koi ENTER signal nahi. "No trade" bhi ek valid decision hai.</div> :
-        <div className="table-wrap"><table><thead><tr><th>Time</th><th>Underlying</th><th>Strategy</th><th>Direction</th><th className="r">Entry</th><th className="r">Stop</th><th className="r">Target</th></tr></thead>
+        <div className="table-wrap"><table><thead><tr><th>Time</th><th>Underlying</th><th>Strategy</th><th>Direction</th><th className="r">Entry</th><th className="r">Stop</th><th className="r">Target</th><th>Status</th></tr></thead>
           <tbody>{sigs.slice(0, 8).map(x => <tr key={x.id}><td className="num">{istTime(x.createdAt)}</td><td><b>{x.underlying}</b></td><td>{x.strategyId}</td><td><span className={`pill ${x.direction}`}>{x.direction}</span></td>
-            <td className="r num">{fmt(x.entry)}</td><td className="r num">{fmt(x.stop)}</td><td className="r num">{fmt(x.target)}</td></tr>)}</tbody></table></div>}
+            <td className="r num">{fmt(x.entry)}</td><td className="r num">{fmt(x.stop)}</td><td className="r num">{fmt(x.target)}</td>
+            <td>{x.status === "TRADED_LIVE" ? <span className="pill SHORT">🔴 LIVE trade</span> : x.status === "TRADED" ? <span className="pill LONG">✓ Traded</span>
+              : x.status === "SKIPPED" ? <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><span className="pill NEUTRAL" title={x.skipReason ?? ""}>Skipped ⓘ</span>
+                {x.takeable && <button className="btn sm primary" disabled={!!taking} onClick={() => take(x.id)} title={`Skip reason: ${x.skipReason}\nAbhi ke price par dobara try (same risk checks${health?.liveTrading ? ", LIVE order" : ""})`}>{taking === x.id ? "⏳" : "↻ Retry / Take now"}</button>}</span>
+              : <span className="muted">—</span>}</td></tr>)}</tbody></table></div>}
+      {takeMsg && <div className={`note ${takeMsg.ok ? "" : "bad"}`} style={{ marginTop: 10 }}>{takeMsg.text}</div>}
     </section>
 
     {plan && <TradingPlan onClose={() => setPlan(false)} go={go} />}
