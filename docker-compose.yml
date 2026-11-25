@@ -36,8 +36,11 @@ services:
       LOG_LEVEL: info
     expose:
       - "4000"
+    networks:
+      - coolify   # Coolify's Caddy proxy lives here — without it Caddy can't reach the app (503)
     labels:
       caddy: https://trade.itspar.com
+      caddy_ingress_network: coolify
       caddy.reverse_proxy: "{{upstreams 4000}}"
       caddy.encode: zstd gzip
     healthcheck:
@@ -51,3 +54,7 @@ services:
 
 volumes:
   trader-data:
+
+networks:
+  coolify:
+    external: true
