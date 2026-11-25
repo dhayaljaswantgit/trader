@@ -18,8 +18,11 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      # fixed (not ${...}) so a copied local .env value like 127.0.0.1 can never hide the app from Caddy
+      API_HOST: "0.0.0.0"
+      API_PORT: "4000"
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to your existing Postgres, e.g. postgresql://user:pass@host:5432/dhan_trader}
-      PUBLIC_URL: ${PUBLIC_URL:-https://trade.itspar.com}
+      PUBLIC_URL: https://trade.itspar.com
       # Google sign-in: only ALLOWED_EMAILS can open the app (comma separated)
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
