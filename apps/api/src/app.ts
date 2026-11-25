@@ -109,6 +109,7 @@ export async function buildApp(opts: { prisma: PrismaClient; clock?: () => Date;
     if (!tokenId) return reply.redirect("/?dhan=error&msg=" + encodeURIComponent("Dhan ne tokenId nahi bheja"));
     try {
       const r = await dhanAuth.complete(tokenId);
+      dhanAuth.renewState.lastError = null; // fresh login → old renew failure no longer relevant
       broker.use("DHAN"); engines.DHAN.clearCache();
       await audit("DHAN_AUTHORIZED", { client: r.clientName, expiryTime: r.expiryTime }, undefined, "DHAN");
       return reply.redirect("/?dhan=connected");

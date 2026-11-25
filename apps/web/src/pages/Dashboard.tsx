@@ -109,7 +109,8 @@ export function Dashboard({ health, go }: { health: Health | null; go: (p: any) 
 
   return <>
     <section className="card">
-      <div className="card-head"><h2>Today · {s.tradingDate}</h2><Chip kind={stKind}>{stLabel}</Chip><Chip kind="warn">PAPER</Chip><button className="btn sm" onClick={() => setEditing(!editing)}>✎ Edit limits</button></div>
+      <div className="card-head"><h2>Today · {s.tradingDate}</h2><Chip kind={stKind}>{stLabel}</Chip>{getVenue() === "DHAN" && health?.liveTrading ? <Chip kind="bad" pulse>🔴 LIVE</Chip>
+          : getVenue() === "DHAN" && prefs?.liveTrading ? <Chip kind="warn">LIVE on · data MOCK → paper</Chip> : <Chip kind="warn">PAPER</Chip>}<button className="btn sm" onClick={() => setEditing(!editing)}>✎ Edit limits</button></div>
       <div className="grid g-main" style={{ alignItems: "center" }}>
         <div>
           <div className="muted" style={{ fontSize: 12 }}>SESSION P&L (realized + unrealized)</div>
